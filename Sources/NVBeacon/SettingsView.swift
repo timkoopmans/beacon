@@ -9,6 +9,8 @@ struct SettingsView: View {
     @State private var draftPassword = ""
     @State private var sshConfigHosts = SSHConfigLoader.loadHosts()
     @State private var selectedSSHConfigAlias = ""
+    @State private var selectedServerID = ""
+    @State private var pendingPasswordAuthServerID: String?
     @State private var autoApplyRevision = 0
     @State private var suppressAutoApply = true
     @State private var suppressPasswordAuthWarning = false
@@ -27,8 +29,21 @@ struct SettingsView: View {
         language.text(english, korean)
     }
 
-    private var passwordSessionTint: Color {
-        switch store.passwordSessionState {
+    private var selectedServerIndex: Int? {
+        draft.servers.firstIndex { $0.id == selectedServerID }
+    }
+
+    private var selectedServer: ServerConfig? {
+        selectedServerIndex.map { draft.servers[$0] }
+    }
+
+    private var selectedPasswordSessionState: SSHPasswordSessionState {
+        guard let selectedServer else { return .notRequired }
+        return store.passwordSessionState(for: selectedServer.id)
+    }
+
+    private func passwordSessionTint(for state: SSHPasswordSessionState) -> Color {
+        switch state {
         case .unlocked:
             return .green
         case .locked:
@@ -116,16 +131,6 @@ struct SettingsView: View {
         .onChange(of: draft) { _, _ in
             scheduleAutoApply()
         }
-        .onChange(of: draft.sshAuthenticationMode) { _, newValue in
-            if shouldPresentPasswordAuthWarning(for: newValue) {
-                presentPasswordAuthWarning()
-                return
-            }
-
-            if newValue != .passwordBased {
-                draftPassword = ""
-            }
-        }
         .task(id: autoApplyRevision) {
             guard autoApplyRevision > 0 else { return }
             try? await Task.sleep(for: .milliseconds(350))
@@ -142,7 +147,9 @@ struct SettingsView: View {
                 enablePasswordAuthAfterWarning()
             }
 
-            Button(t("Cancel", "취소"), role: .cancel) {}
+            Button(t("Cancel", "취소"), role: .cancel) {
+                pendingPasswordAuthServerID = nil
+            }
         } message: {
             Text(
                 t(
@@ -156,107 +163,23 @@ struct SettingsView: View {
     private var generalPane: some View {
         Form {
             Section {
-                if !sshConfigHosts.isEmpty {
-                    LabeledContent(t("Saved Host", "저장된 호스트")) {
-                        HStack(spacing: 8) {
-                            Picker(t("Saved Host", "저장된 호스트"), selection: $selectedSSHConfigAlias) {
-                                Text(t("Select a saved host", "저장된 호스트 선택")).tag("")
-
-                                ForEach(sshConfigHosts) { host in
-                                    Text(host.displayName).tag(host.alias)
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(minWidth: 260, maxWidth: 320)
-
-                            Button(t("Reload", "새로고침")) {
-                                reloadSSHConfigHosts()
-                            }
-
-                            Button(t("Use", "사용")) {
-                                applySSHConfigHost()
-                            }
-                            .disabled(selectedSSHConfigHost == nil)
-                        }
-                    }
-
-                    if let selectedSSHConfigHost {
-                        Text(selectedSSHConfigHost.detailSummary(in: language))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                LabeledContent(t("SSH Target", "SSH 대상")) {
-                    TextField("", text: $draft.sshTarget, prompt: Text("gpu-prod or user@host"))
-                        .labelsHidden()
-                        .textFieldStyle(.roundedBorder)
-                        .multilineTextAlignment(.leading)
-                        .frame(width: 320)
-                }
-
-                LabeledContent(t("Auth Method", "인증 방식")) {
-                    Picker(t("Auth Method", "인증 방식"), selection: $draft.sshAuthenticationMode) {
-                        ForEach(SSHAuthenticationMode.allCases) { mode in
-                            Text(mode.title(in: language)).tag(mode)
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-
-                LabeledContent(t("Identity File", "Identity 파일")) {
-                    TextField("", text: $draft.sshIdentityFilePath, prompt: Text(t("Optional", "선택 사항")))
-                        .labelsHidden()
-                        .textFieldStyle(.roundedBorder)
-                        .multilineTextAlignment(.leading)
-                        .frame(width: 320)
-                }
-
-                if draft.sshAuthenticationMode == .passwordBased {
-                    LabeledContent(t("Password Session", "비밀번호 세션")) {
-                        Text(store.passwordSessionState.title(in: language))
-                            .foregroundStyle(passwordSessionTint)
-                    }
-
-                    LabeledContent(t("SSH Password", "SSH 비밀번호")) {
-                        SecureField("", text: $draftPassword, prompt: Text(t("Optional", "선택 사항")))
-                            .labelsHidden()
-                            .textFieldStyle(.roundedBorder)
-                            .multilineTextAlignment(.leading)
-                            .frame(width: 240)
-                    }
-
-                    HStack(spacing: 8) {
-                        Button(t("Save Password", "비밀번호 저장")) {
-                            applyPasswordSettingsImmediately()
-                            saveDraftPassword()
-                        }
-                        .disabled(draftPassword.trimmingCharacters(in: .newlines).isEmpty)
-
-                        Button(t("Unlock Saved Password", "저장된 비밀번호 해제")) {
-                            applyPasswordSettingsImmediately()
-                            store.unlockSavedPasswordForCurrentSession()
-                        }
-                        .disabled(!store.passwordSessionState.supportsUnlockAction)
-
-                        Button(t("Forget Saved Password", "저장된 비밀번호 삭제"), role: .destructive) {
-                            applyPasswordSettingsImmediately()
-                            store.forgetSavedPassword()
-                        }
-                        .disabled(!store.passwordSessionState.supportsForgetAction)
-                    }
-                }
-
-                LabeledContent("SSH Port") {
-                    TextField("", text: $draft.sshPort, prompt: Text(t("Optional", "선택 사항")))
-                        .labelsHidden()
-                        .textFieldStyle(.roundedBorder)
-                        .multilineTextAlignment(.leading)
-                        .frame(width: 120)
-                }
+                serverPickerRow
             } header: {
-                Text(t("Connection", "연결"))
+                Text(t("Servers", "서버"))
+            } footer: {
+                Text(t("The popover uses this server order.", "팝오버는 이 서버 순서를 사용합니다."))
+            }
+
+            Section {
+                addServerRow
+            } header: {
+                Text(t("Add Server", "서버 추가"))
+            }
+
+            Section {
+                selectedServerEditor
+            } header: {
+                Text(t("Selected Server", "선택된 서버"))
             }
 
             Section {
@@ -271,13 +194,14 @@ struct SettingsView: View {
 
                 LabeledContent {
                     HStack(spacing: 8) {
-                        Picker(t("SSH Connection", "SSH 연결"), selection: $draft.sshConnectionReuseMode) {
+                        Picker(t("SSH Connection", "SSH 연결"), selection: selectedServerConnectionReuseBinding()) {
                             ForEach(SSHConnectionReuseMode.allCases) { mode in
                                 Text(mode.title(in: language)).tag(mode)
                             }
                         }
                         .labelsHidden()
                         .fixedSize()
+                        .disabled(selectedServer == nil)
 
                         Button {
                             showConnectionReuseHelp.toggle()
@@ -290,7 +214,7 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text(t("About SSH connection reuse", "SSH 연결 재사용 안내"))
                                     .font(.headline)
-                                Text(draft.sshConnectionReuseMode.helpText(in: language))
+                                Text((selectedServer?.sshConnectionReuseMode ?? .reuseWhenPossible).helpText(in: language))
                                     .font(.callout)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
@@ -543,14 +467,15 @@ struct SettingsView: View {
     private var advancedPane: some View {
         Form {
             Section {
-                TextField("", text: $draft.remoteCommand, prompt: Text(AppSettings.defaultRemoteCommand))
+                TextField("", text: selectedServerStringBinding(\.remoteCommand, defaultValue: AppSettings.defaultRemoteCommand), prompt: Text(AppSettings.defaultRemoteCommand))
                     .labelsHidden()
                     .textFieldStyle(.roundedBorder)
                     .multilineTextAlignment(.leading)
+                    .disabled(selectedServer == nil)
             } header: {
                 Text(t("Remote Command", "원격 명령"))
             } footer: {
-                Text(t("Only change this if you need a custom command.", "커스텀 명령이 필요할 때만 변경하세요."))
+                Text(t("Applies to the selected server. Only change this if you need a custom command.", "선택된 서버에 적용됩니다. 커스텀 명령이 필요할 때만 변경하세요."))
             }
 
             Section {
@@ -634,12 +559,10 @@ struct SettingsView: View {
 
                 AboutCard(title: t("Current Configuration", "현재 설정")) {
                     AboutInfoRow(
-                        title: t("Current Target", "현재 대상"),
-                        value: store.settings.isConfigured ? store.settings.sshTarget : t("Not configured", "미설정")
-                    )
-                    AboutInfoRow(
-                        title: t("Authentication", "인증 방식"),
-                        value: store.settings.sshAuthenticationMode.title(in: language)
+                        title: t("Servers", "서버"),
+                        value: store.settings.isConfigured
+                            ? t("\(store.pollableServerCount) enabled / \(store.configuredServerCount) configured", "\(store.pollableServerCount)개 활성 / \(store.configuredServerCount)개 설정")
+                            : t("Not configured", "미설정")
                     )
                     AboutInfoRow(
                         title: t("Refresh Interval", "새로고침 주기"),
@@ -667,12 +590,12 @@ struct SettingsView: View {
                     AboutInfoRow(title: t("Process Watches", "프로세스 감시"), value: "\(store.watchedProcesses.count)")
                     AboutInfoRow(title: t("GPU Idle Watches", "GPU idle 감시"), value: "\(store.watchedIdleGPUs.count)")
 
-                    if let snapshot = store.snapshot {
-                        let busyCount = snapshot.busyCount(using: store.settings)
-                        AboutInfoRow(title: t("Visible GPUs", "표시 중인 GPU"), value: "\(snapshot.gpus.count)")
-                        AboutInfoRow(title: t("Busy GPUs", "사용 중인 GPU"), value: "\(busyCount)")
-                        AboutInfoRow(title: t("Processes", "프로세스"), value: "\(snapshot.totalProcessCount)")
-                        AboutInfoRow(title: t("Average Utilization", "평균 사용률"), value: "\(snapshot.averageUtilization)%")
+                    if store.totalGPUCount > 0 {
+                        AboutInfoRow(title: t("Visible GPUs", "표시 중인 GPU"), value: "\(store.totalGPUCount)")
+                        AboutInfoRow(title: t("Busy GPUs", "사용 중인 GPU"), value: "\(store.fleetBusyCount)")
+                        AboutInfoRow(title: t("Processes", "프로세스"), value: "\(store.totalProcessCount)")
+                        AboutInfoRow(title: t("Average Utilization", "평균 사용률"), value: "\(store.fleetAverageUtilization)%")
+                        AboutInfoRow(title: t("Server Errors", "서버 오류"), value: "\(store.failedServerCount)")
                     } else {
                         Text(t("GPU data has not been loaded yet.", "GPU 데이터가 아직 로드되지 않았습니다."))
                             .font(.subheadline)
@@ -701,20 +624,17 @@ struct SettingsView: View {
 
     private func loadCurrentSettings() {
         suppressAutoApply = true
-        let currentSettings = store.settings
+        let currentSettings = store.settings.normalized()
 
-        if sshConfigHosts.contains(where: { $0.alias == currentSettings.sshTarget }) {
-            selectedSSHConfigAlias = currentSettings.sshTarget
-        } else if selectedSSHConfigAlias.isEmpty {
+        draft = currentSettings
+
+        if selectedServerID.isEmpty || !draft.servers.contains(where: { $0.id == selectedServerID }) {
+            selectedServerID = draft.servers.first?.id ?? ""
+        }
+
+        if selectedSSHConfigAlias.isEmpty {
             selectedSSHConfigAlias = sshConfigHosts.first?.alias ?? ""
         }
-
-        if let selectedSSHConfigHost, selectedSSHConfigHost.alias == currentSettings.sshTarget {
-            draft = selectedSSHConfigHost.backfillingMissingFields(in: currentSettings)
-        } else {
-            draft = currentSettings
-        }
-
         draftPassword = ""
         releaseAutoApplySuppression()
     }
@@ -727,15 +647,58 @@ struct SettingsView: View {
         }
     }
 
-    private func applySSHConfigHost() {
-        guard let selectedSSHConfigHost else { return }
-        draft = selectedSSHConfigHost.apply(to: draft)
+    private func addBlankServer() {
+        let newServer = ServerConfig(name: t("New Server", "새 서버"))
+        draft.servers.append(newServer)
+        selectedServerID = newServer.id
+    }
+
+    private func addSSHConfigServer() {
+        guard let selectedSSHConfigHost else {
+            addBlankServer()
+            return
+        }
+
+        let newServer = selectedSSHConfigHost.newServer()
+        draft.servers.append(newServer)
+        selectedServerID = newServer.id
+    }
+
+    private func removeSelectedServer() {
+        guard let selectedServerIndex else { return }
+        let removedServerID = draft.servers[selectedServerIndex].id
+        draft.servers.remove(at: selectedServerIndex)
+        draftPassword = ""
+
+        if selectedServerID == removedServerID {
+            selectedServerID = draft.servers.first?.id ?? ""
+        }
+
+        if draft.servers.isEmpty {
+            draft.sshTarget = ""
+            draft.sshPort = ""
+            draft.sshIdentityFilePath = ""
+            draft.remoteCommand = AppSettings.defaultRemoteCommand
+        }
+    }
+
+    private func moveSelectedServerUp() {
+        guard let selectedServerIndex, selectedServerIndex > 0 else { return }
+        draft.servers.swapAt(selectedServerIndex, selectedServerIndex - 1)
+        selectedServerID = draft.servers[selectedServerIndex - 1].id
+    }
+
+    private func moveSelectedServerDown() {
+        guard let selectedServerIndex, selectedServerIndex < draft.servers.count - 1 else { return }
+        draft.servers.swapAt(selectedServerIndex, selectedServerIndex + 1)
+        selectedServerID = draft.servers[selectedServerIndex + 1].id
     }
 
     private func saveDraftPassword() {
         let trimmedPassword = draftPassword.trimmingCharacters(in: .newlines)
         guard !trimmedPassword.isEmpty else { return }
-        store.savePasswordForCurrentSession(trimmedPassword)
+        guard let selectedServer else { return }
+        store.savePassword(trimmedPassword, for: selectedServer.id)
         draftPassword = ""
     }
 
@@ -750,9 +713,9 @@ struct SettingsView: View {
         return true
     }
 
-    private func presentPasswordAuthWarning() {
+    private func presentPasswordAuthWarning(for serverID: String) {
         suppressPasswordAuthWarning = true
-        draft.sshAuthenticationMode = .keyBased
+        pendingPasswordAuthServerID = serverID
         showPasswordAuthWarning = true
         DispatchQueue.main.async {
             suppressPasswordAuthWarning = false
@@ -761,9 +724,252 @@ struct SettingsView: View {
 
     private func enablePasswordAuthAfterWarning() {
         suppressPasswordAuthWarning = true
-        draft.sshAuthenticationMode = .passwordBased
+        if let pendingPasswordAuthServerID,
+           let index = draft.servers.firstIndex(where: { $0.id == pendingPasswordAuthServerID }) {
+            draft.servers[index].sshAuthenticationMode = .passwordBased
+        }
+        pendingPasswordAuthServerID = nil
         DispatchQueue.main.async {
             suppressPasswordAuthWarning = false
+        }
+    }
+
+    private func selectedServerStringBinding(_ keyPath: WritableKeyPath<ServerConfig, String>, defaultValue: String = "") -> Binding<String> {
+        Binding(
+            get: {
+                guard let selectedServerIndex else { return defaultValue }
+                return draft.servers[selectedServerIndex][keyPath: keyPath]
+            },
+            set: { newValue in
+                guard let selectedServerIndex else { return }
+                draft.servers[selectedServerIndex][keyPath: keyPath] = newValue
+            }
+        )
+    }
+
+    private func selectedServerBoolBinding(_ keyPath: WritableKeyPath<ServerConfig, Bool>) -> Binding<Bool> {
+        Binding(
+            get: {
+                guard let selectedServerIndex else { return false }
+                return draft.servers[selectedServerIndex][keyPath: keyPath]
+            },
+            set: { newValue in
+                guard let selectedServerIndex else { return }
+                draft.servers[selectedServerIndex][keyPath: keyPath] = newValue
+            }
+        )
+    }
+
+    private func selectedServerAuthModeBinding() -> Binding<SSHAuthenticationMode> {
+        Binding(
+            get: {
+                selectedServer?.sshAuthenticationMode ?? .keyBased
+            },
+            set: { newValue in
+                guard let selectedServerIndex else { return }
+                let serverID = draft.servers[selectedServerIndex].id
+
+                if shouldPresentPasswordAuthWarning(for: newValue) {
+                    presentPasswordAuthWarning(for: serverID)
+                    return
+                }
+
+                draft.servers[selectedServerIndex].sshAuthenticationMode = newValue
+                if newValue != .passwordBased {
+                    draftPassword = ""
+                }
+            }
+        )
+    }
+
+    private func selectedServerConnectionReuseBinding() -> Binding<SSHConnectionReuseMode> {
+        Binding(
+            get: {
+                selectedServer?.sshConnectionReuseMode ?? .reuseWhenPossible
+            },
+            set: { newValue in
+                guard let selectedServerIndex else { return }
+                draft.servers[selectedServerIndex].sshConnectionReuseMode = newValue
+            }
+        )
+    }
+
+    private var serverPickerRow: some View {
+        LabeledContent(t("Current", "현재")) {
+            HStack(spacing: 8) {
+                Picker(t("Server", "서버"), selection: $selectedServerID) {
+                    ForEach(draft.servers) { server in
+                        Text(server.displayName).tag(server.id)
+                    }
+                }
+                .labelsHidden()
+                .frame(minWidth: 240, maxWidth: 300)
+                .disabled(draft.servers.isEmpty)
+
+                Button {
+                    moveSelectedServerUp()
+                } label: {
+                    Image(systemName: "chevron.up")
+                }
+                .disabled((selectedServerIndex ?? 0) <= 0)
+                .help(t("Move selected server up", "선택된 서버를 위로 이동"))
+
+                Button {
+                    moveSelectedServerDown()
+                } label: {
+                    Image(systemName: "chevron.down")
+                }
+                .disabled(selectedServerIndex == nil || selectedServerIndex == draft.servers.count - 1)
+                .help(t("Move selected server down", "선택된 서버를 아래로 이동"))
+
+                Button(role: .destructive) {
+                    removeSelectedServer()
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .disabled(selectedServer == nil)
+                .help(t("Remove selected server", "선택된 서버 삭제"))
+            }
+        }
+    }
+
+    private var addServerRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button(t("New Server", "새 서버")) {
+                    addBlankServer()
+                }
+
+                if !sshConfigHosts.isEmpty {
+                    Button(t("Reload Saved Hosts", "저장된 호스트 새로고침")) {
+                        reloadSSHConfigHosts()
+                    }
+                }
+            }
+
+            if !sshConfigHosts.isEmpty {
+                savedHostAddRow
+            } else {
+                Text(t("No saved hosts were found in ~/.ssh/config.", "~/.ssh/config에서 저장된 호스트를 찾지 못했습니다."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var savedHostAddRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent(t("Saved Host", "저장된 호스트")) {
+                HStack(spacing: 8) {
+                    Picker(t("Saved Host", "저장된 호스트"), selection: $selectedSSHConfigAlias) {
+                        Text(t("Select a saved host", "저장된 호스트 선택")).tag("")
+
+                        ForEach(sshConfigHosts) { host in
+                            Text(host.displayName).tag(host.alias)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(minWidth: 260, maxWidth: 320)
+
+                    Button(t("Add Saved Host", "저장된 호스트 추가")) {
+                        addSSHConfigServer()
+                    }
+                    .disabled(selectedSSHConfigHost == nil)
+                }
+            }
+
+            if let selectedSSHConfigHost {
+                Text(selectedSSHConfigHost.detailSummary(in: language))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var selectedServerEditor: some View {
+        if let selectedServer {
+            Toggle(t("Enabled", "활성화"), isOn: selectedServerBoolBinding(\.isEnabled))
+
+            LabeledContent(t("Name", "이름")) {
+                TextField("", text: selectedServerStringBinding(\.name), prompt: Text(selectedServer.sshTarget.isEmpty ? "GPU Server" : selectedServer.sshTarget))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: 240)
+            }
+
+            LabeledContent(t("SSH Target", "SSH 대상")) {
+                TextField("", text: selectedServerStringBinding(\.sshTarget), prompt: Text("gpu-prod or user@host"))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: 320)
+            }
+
+            LabeledContent("SSH Port") {
+                TextField("", text: selectedServerStringBinding(\.sshPort), prompt: Text(t("Optional", "선택 사항")))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: 120)
+            }
+
+            LabeledContent(t("Auth Method", "인증 방식")) {
+                Picker(t("Auth Method", "인증 방식"), selection: selectedServerAuthModeBinding()) {
+                    ForEach(SSHAuthenticationMode.allCases) { mode in
+                        Text(mode.title(in: language)).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+
+            LabeledContent(t("Identity File", "Identity 파일")) {
+                TextField("", text: selectedServerStringBinding(\.sshIdentityFilePath), prompt: Text(t("Optional", "선택 사항")))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: 320)
+            }
+
+            if selectedServer.sshAuthenticationMode == .passwordBased {
+                LabeledContent(t("Password Session", "비밀번호 세션")) {
+                    Text(selectedPasswordSessionState.title(in: language))
+                        .foregroundStyle(passwordSessionTint(for: selectedPasswordSessionState))
+                }
+
+                LabeledContent(t("SSH Password", "SSH 비밀번호")) {
+                    SecureField("", text: $draftPassword, prompt: Text(t("Optional", "선택 사항")))
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.leading)
+                        .frame(width: 240)
+                }
+
+                HStack(spacing: 8) {
+                    Button(t("Save Password", "비밀번호 저장")) {
+                        applyPasswordSettingsImmediately()
+                        saveDraftPassword()
+                    }
+                    .disabled(draftPassword.trimmingCharacters(in: .newlines).isEmpty)
+
+                    Button(t("Unlock Saved Password", "저장된 비밀번호 해제")) {
+                        applyPasswordSettingsImmediately()
+                        store.unlockSavedPassword(for: selectedServer.id)
+                    }
+                    .disabled(!selectedPasswordSessionState.supportsUnlockAction)
+
+                    Button(t("Forget Saved Password", "저장된 비밀번호 삭제"), role: .destructive) {
+                        applyPasswordSettingsImmediately()
+                        store.forgetSavedPassword(for: selectedServer.id)
+                    }
+                    .disabled(!selectedPasswordSessionState.supportsForgetAction)
+                }
+            }
+        } else {
+            Text(t("Add a server to start monitoring remote GPUs.", "원격 GPU 모니터링을 시작하려면 서버를 추가하세요."))
+                .foregroundStyle(.secondary)
         }
     }
 

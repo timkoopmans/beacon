@@ -323,10 +323,189 @@ enum NotificationPermissionState: Equatable, Sendable {
     }
 }
 
+struct ServerConfig: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var name: String
+    var sshTarget: String
+    var sshPort: String
+    var sshIdentityFilePath: String
+    var sshAuthenticationMode: SSHAuthenticationMode
+    var sshConnectionReuseMode: SSHConnectionReuseMode
+    var remoteCommand: String
+    var isEnabled: Bool
+
+    init(
+        id: String = UUID().uuidString,
+        name: String = "",
+        sshTarget: String = "",
+        sshPort: String = "",
+        sshIdentityFilePath: String = "",
+        sshAuthenticationMode: SSHAuthenticationMode = .keyBased,
+        sshConnectionReuseMode: SSHConnectionReuseMode = .reuseWhenPossible,
+        remoteCommand: String = AppSettings.defaultRemoteCommand,
+        isEnabled: Bool = true
+    ) {
+        self.id = id
+        self.name = name
+        self.sshTarget = sshTarget
+        self.sshPort = sshPort
+        self.sshIdentityFilePath = sshIdentityFilePath
+        self.sshAuthenticationMode = sshAuthenticationMode
+        self.sshConnectionReuseMode = sshConnectionReuseMode
+        self.remoteCommand = remoteCommand
+        self.isEnabled = isEnabled
+    }
+
+    var displayName: String {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedName.isEmpty {
+            return trimmedName
+        }
+
+        return sshTarget.isEmpty ? "Server" : sshTarget
+    }
+
+    var isConfigured: Bool {
+        !sshTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var isPollable: Bool {
+        isEnabled && isConfigured
+    }
+
+    var resolvedPort: Int? {
+        guard let port = Int(sshPort), (1...65535).contains(port) else {
+            return nil
+        }
+
+        return port
+    }
+
+    var keychainAccount: String {
+        "server.\(id)"
+    }
+
+    var connectionFingerprint: String {
+        [
+            sshTarget,
+            sshPort,
+            sshIdentityFilePath,
+            sshAuthenticationMode.rawValue,
+        ].joined(separator: "|")
+    }
+
+    func normalized() -> Self {
+        var copy = self
+        copy.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        copy.sshTarget = sshTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        copy.sshPort = sshPort.trimmingCharacters(in: .whitespacesAndNewlines)
+        copy.sshIdentityFilePath = NSString(string: sshIdentityFilePath.trimmingCharacters(in: .whitespacesAndNewlines)).expandingTildeInPath
+
+        let trimmedCommand = remoteCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedCommand.isEmpty || trimmedCommand == AppSettings.legacyDefaultRemoteCommand {
+            copy.remoteCommand = AppSettings.defaultRemoteCommand
+        } else {
+            copy.remoteCommand = trimmedCommand
+        }
+
+        return copy
+    }
+
+    func connectionSettings(from settings: AppSettings) -> AppSettings {
+        var copy = settings
+        copy.sshTarget = sshTarget
+        copy.sshPort = sshPort
+        copy.sshIdentityFilePath = sshIdentityFilePath
+        copy.sshAuthenticationMode = sshAuthenticationMode
+        copy.sshConnectionReuseMode = sshConnectionReuseMode
+        copy.remoteCommand = remoteCommand
+        copy.servers = [self]
+        return copy
+    }
+
+    func detectedSSHUsername(
+        using sshConfigHosts: [SSHConfigHost] = SSHConfigLoader.loadHosts(),
+        fallbackLocalUsername: String? = NSUserName()
+    ) -> String? {
+        if let explicitUsername = Self.normalizedUsername(from: sshTarget.components(separatedBy: "@").first, requiresAtSymbolIn: sshTarget) {
+            return explicitUsername
+        }
+
+        if let configuredUsername = sshConfigHosts
+            .first(where: { $0.alias == sshTarget })?
+            .user
+            .flatMap({ Self.normalizedUsername(from: $0) }) {
+            return configuredUsername
+        }
+
+        guard isConfigured else { return nil }
+        return Self.normalizedUsername(from: fallbackLocalUsername)
+    }
+
+    static func fromLegacySettings(_ settings: AppSettings) -> ServerConfig? {
+        guard settings.isLegacyConfigured else { return nil }
+
+        return ServerConfig(
+            id: "legacy-primary",
+            name: "",
+            sshTarget: settings.sshTarget,
+            sshPort: settings.sshPort,
+            sshIdentityFilePath: settings.sshIdentityFilePath,
+            sshAuthenticationMode: settings.sshAuthenticationMode,
+            sshConnectionReuseMode: settings.sshConnectionReuseMode,
+            remoteCommand: settings.remoteCommand,
+            isEnabled: true
+        ).normalized()
+    }
+
+    private static func normalizedUsername(from value: String?, requiresAtSymbolIn source: String? = nil) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let source, !source.contains("@") {
+            return nil
+        }
+
+        return trimmed.lowercased()
+    }
+}
+
+struct ServerRuntimeState: Identifiable, Equatable, Sendable {
+    let id: String
+    var server: ServerConfig
+    var snapshot: GPUSnapshot?
+    var isRefreshing: Bool
+    var lastErrorMessage: String?
+    var passwordSessionState: SSHPasswordSessionState
+    var detectedSSHUsername: String?
+    var detectedSSHUserID: Int?
+
+    init(
+        server: ServerConfig,
+        snapshot: GPUSnapshot? = nil,
+        isRefreshing: Bool = false,
+        lastErrorMessage: String? = nil,
+        passwordSessionState: SSHPasswordSessionState = .notRequired,
+        detectedSSHUsername: String? = nil,
+        detectedSSHUserID: Int? = nil
+    ) {
+        self.id = server.id
+        self.server = server
+        self.snapshot = snapshot
+        self.isRefreshing = isRefreshing
+        self.lastErrorMessage = lastErrorMessage
+        self.passwordSessionState = passwordSessionState
+        self.detectedSSHUsername = detectedSSHUsername
+        self.detectedSSHUserID = detectedSSHUserID
+    }
+}
+
 struct AppSettings: Codable, Equatable, Sendable {
     static let legacyDefaultRemoteCommand = "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits"
     static let defaultRemoteCommand = "nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits"
 
+    var servers: [ServerConfig] = []
     var sshTarget: String = ""
     var sshPort: String = ""
     var sshIdentityFilePath: String = ""
@@ -347,6 +526,7 @@ struct AppSettings: Codable, Equatable, Sendable {
     var idleMemoryThresholdMB: Int = 50
 
     init(
+        servers: [ServerConfig] = [],
         sshTarget: String = "",
         sshPort: String = "",
         sshIdentityFilePath: String = "",
@@ -366,6 +546,7 @@ struct AppSettings: Codable, Equatable, Sendable {
         idleNotificationSeconds: Int = 300,
         idleMemoryThresholdMB: Int = 50
     ) {
+        self.servers = servers
         self.sshTarget = sshTarget
         self.sshPort = sshPort
         self.sshIdentityFilePath = sshIdentityFilePath
@@ -387,6 +568,7 @@ struct AppSettings: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case servers
         case sshTarget
         case sshPort
         case sshIdentityFilePath
@@ -410,6 +592,7 @@ struct AppSettings: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
+            servers: try container.decodeIfPresent([ServerConfig].self, forKey: .servers) ?? [],
             sshTarget: try container.decodeIfPresent(String.self, forKey: .sshTarget) ?? "",
             sshPort: try container.decodeIfPresent(String.self, forKey: .sshPort) ?? "",
             sshIdentityFilePath: try container.decodeIfPresent(String.self, forKey: .sshIdentityFilePath) ?? "",
@@ -432,7 +615,27 @@ struct AppSettings: Codable, Equatable, Sendable {
     }
 
     var isConfigured: Bool {
+        if !servers.isEmpty {
+            return servers.contains(where: \.isConfigured)
+        }
+
+        return isLegacyConfigured
+    }
+
+    var isLegacyConfigured: Bool {
         !sshTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var configuredServers: [ServerConfig] {
+        if !servers.isEmpty {
+            return servers.filter(\.isConfigured)
+        }
+
+        return ServerConfig.fromLegacySettings(self).map { [$0] } ?? []
+    }
+
+    var pollableServers: [ServerConfig] {
+        configuredServers.filter(\.isPollable)
     }
 
     func normalized() -> Self {
@@ -451,6 +654,26 @@ struct AppSettings: Codable, Equatable, Sendable {
             copy.remoteCommand = Self.defaultRemoteCommand
         } else {
             copy.remoteCommand = trimmedCommand
+        }
+
+        if copy.servers.isEmpty, let legacyServer = ServerConfig.fromLegacySettings(copy) {
+            copy.servers = [legacyServer]
+        } else {
+            copy.servers = copy.servers.map { $0.normalized() }
+        }
+
+        if let primaryServer = copy.servers.first(where: \.isConfigured) ?? copy.servers.first {
+            copy.sshTarget = primaryServer.sshTarget
+            copy.sshPort = primaryServer.sshPort
+            copy.sshIdentityFilePath = primaryServer.sshIdentityFilePath
+            copy.sshAuthenticationMode = primaryServer.sshAuthenticationMode
+            copy.sshConnectionReuseMode = primaryServer.sshConnectionReuseMode
+            copy.remoteCommand = primaryServer.remoteCommand
+        } else {
+            copy.sshTarget = ""
+            copy.sshPort = ""
+            copy.sshIdentityFilePath = ""
+            copy.remoteCommand = Self.defaultRemoteCommand
         }
 
         return copy
@@ -477,6 +700,13 @@ struct AppSettings: Codable, Equatable, Sendable {
         using sshConfigHosts: [SSHConfigHost] = SSHConfigLoader.loadHosts(),
         fallbackLocalUsername: String? = NSUserName()
     ) -> String? {
+        if let primaryServer = configuredServers.first {
+            return primaryServer.detectedSSHUsername(
+                using: sshConfigHosts,
+                fallbackLocalUsername: fallbackLocalUsername
+            )
+        }
+
         if let explicitUsername = Self.normalizedUsername(from: sshTarget.components(separatedBy: "@").first, requiresAtSymbolIn: sshTarget) {
             return explicitUsername
         }
@@ -755,8 +985,34 @@ struct ProcessExitWatch: Codable, Identifiable, Equatable, Sendable {
     let createdAt: Date
 
     init(settings: AppSettings, gpu: GPUReading, process: GPUProcessReading, createdAt: Date = Date()) {
-        self.connectionFingerprint = settings.connectionFingerprint
-        self.connectionLabel = settings.sshTarget
+        self.init(
+            connectionFingerprint: settings.connectionFingerprint,
+            connectionLabel: settings.sshTarget,
+            gpu: gpu,
+            process: process,
+            createdAt: createdAt
+        )
+    }
+
+    init(server: ServerConfig, gpu: GPUReading, process: GPUProcessReading, createdAt: Date = Date()) {
+        self.init(
+            connectionFingerprint: server.connectionFingerprint,
+            connectionLabel: server.displayName,
+            gpu: gpu,
+            process: process,
+            createdAt: createdAt
+        )
+    }
+
+    private init(
+        connectionFingerprint: String,
+        connectionLabel: String,
+        gpu: GPUReading,
+        process: GPUProcessReading,
+        createdAt: Date
+    ) {
+        self.connectionFingerprint = connectionFingerprint
+        self.connectionLabel = connectionLabel
         self.gpuUUID = process.gpuUUID
         self.gpuIndex = gpu.index
         self.gpuName = gpu.name
@@ -831,8 +1087,31 @@ struct GPUIdleWatch: Codable, Identifiable, Equatable, Sendable {
     let createdAt: Date
 
     init(settings: AppSettings, gpu: GPUReading, createdAt: Date = Date()) {
-        self.connectionFingerprint = settings.connectionFingerprint
-        self.connectionLabel = settings.sshTarget
+        self.init(
+            connectionFingerprint: settings.connectionFingerprint,
+            connectionLabel: settings.sshTarget,
+            gpu: gpu,
+            createdAt: createdAt
+        )
+    }
+
+    init(server: ServerConfig, gpu: GPUReading, createdAt: Date = Date()) {
+        self.init(
+            connectionFingerprint: server.connectionFingerprint,
+            connectionLabel: server.displayName,
+            gpu: gpu,
+            createdAt: createdAt
+        )
+    }
+
+    private init(
+        connectionFingerprint: String,
+        connectionLabel: String,
+        gpu: GPUReading,
+        createdAt: Date
+    ) {
+        self.connectionFingerprint = connectionFingerprint
+        self.connectionLabel = connectionLabel
         self.gpuUUID = gpu.uuid
         self.gpuIndex = gpu.index
         self.gpuName = gpu.name

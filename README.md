@@ -23,9 +23,9 @@
 
 ## About
 
-NVBeacon gives you a fast view of a remote NVIDIA GPU server from the macOS menu bar without keeping Terminal open.
+NVBeacon gives you a fast view of one or more remote NVIDIA GPU servers from the macOS menu bar without keeping Terminal open.
 
-It connects over `ssh`, runs `nvidia-smi` on the target server, and turns the result into a compact menu bar summary plus a detailed popover UI with GPU utilization, memory, process details, and job alerts. It is built for people who regularly ask:
+It connects over `ssh`, runs `nvidia-smi` on each enabled target server, and turns the result into a compact menu bar summary plus a detailed popover UI with GPU utilization, memory, process details, and job alerts. It is built for people who regularly ask:
 
 - Is the server busy right now?
 - Which GPU is running my job?
@@ -52,6 +52,7 @@ It connects over `ssh`, runs `nvidia-smi` on the target server, and turns the re
 
 - Native macOS menu bar UI with compact status text or icon-only mode
 - Remote NVIDIA GPU monitoring over `ssh` using `nvidia-smi`
+- Multiple server targets with per-server enable/disable, authentication, connection reuse, and remote command settings
 - Per-GPU utilization, memory, temperature, and process count
 - On-demand process details with user, PID, memory, and command preview
 - Automatic detection and highlighting of your own remote SSH user processes and GPUs
@@ -96,11 +97,12 @@ Download the latest `.dmg` from the [Releases page](https://github.com/jaein4722
 
 1. Launch NVBeacon.
 2. Right-click the menu bar item and open `Settings…`.
-3. Set `SSH Target` directly or import a saved host from `~/.ssh/config`.
-4. Choose your authentication method.
-5. Allow notifications if you want job completion or GPU idle alerts.
-6. Left-click the menu bar item to open the GPU popover.
-7. Open the `About` tab when you want to check for a newer release manually.
+3. Add a server target directly or import a saved host from `~/.ssh/config`.
+4. Add more server targets if you want one menu bar summary across multiple machines.
+5. Choose the authentication method for each server.
+6. Allow notifications if you want job completion or GPU idle alerts.
+7. Left-click the menu bar item to open the GPU popover.
+8. Open the `About` tab when you want to check for a newer release manually.
 
 All settings apply automatically. There is no separate apply button.
 
@@ -117,7 +119,7 @@ You can manage notification permission, active watches, and recent notification 
 
 NVBeacon uses a native macOS-style settings window with these sections:
 
-- `General`: server connection, authentication, polling, startup, busy GPU detection, update preferences
+- `General`: server list, per-server connection/authentication, polling, startup, busy GPU detection, update preferences
 - `Notifications`: permission, test notification, active watches, history, idle thresholds
 - `Appearance`: theme, language, Dock icon, menu bar summary, popover behavior
 - `Advanced`: remote command override
@@ -137,7 +139,7 @@ The interface can be set to:
 
 - NVBeacon uses your local SSH setup directly, including `~/.ssh/config`.
 - In key-based mode, background polling does not read from Keychain.
-- In password-based mode, the password is stored in macOS Keychain and unlocked into memory once per app session to avoid repeated Keychain prompts during polling.
+- In password-based mode, each server password is stored in macOS Keychain and unlocked into memory once per app session to avoid repeated Keychain prompts during polling.
 - The first time you switch to password-based mode, NVBeacon shows a security warning because this mode is less secure than SSH keys.
 - If the remote non-interactive shell has a limited `PATH`, set `Remote Command` to an absolute path such as `/usr/bin/nvidia-smi`.
 - Public DMG downloads may still trigger a Gatekeeper warning unless the release is signed and notarized.
