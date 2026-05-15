@@ -47,6 +47,19 @@ struct SSHConfigHost: Identifiable, Equatable {
         return copy.normalized()
     }
 
+    func apply(to server: ServerConfig) -> ServerConfig {
+        var copy = server
+        copy.name = server.name.isEmpty ? alias : server.name
+        copy.sshTarget = alias
+        copy.sshPort = port ?? ""
+        copy.sshIdentityFilePath = identityFilePath ?? ""
+        return copy.normalized()
+    }
+
+    func newServer() -> ServerConfig {
+        apply(to: ServerConfig(name: alias))
+    }
+
     func backfillingMissingFields(in settings: AppSettings) -> AppSettings {
         var copy = settings
 

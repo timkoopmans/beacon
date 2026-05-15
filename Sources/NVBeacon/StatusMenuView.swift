@@ -12,10 +12,12 @@ private struct StatusMenuContentHeightKey: PreferenceKey {
 struct StatusMenuView: View {
     @ObservedObject var store: NVBeaconStore
     let onContentHeightChange: (CGFloat) -> Void
-    @State private var expandedGPUIds: Set<Int> = []
+    @State private var expandedGPUIds: Set<String> = []
 
-    private var snapshotGPUIds: [Int] {
-        store.snapshot?.gpus.map(\.id) ?? []
+    private var snapshotGPUIds: [String] {
+        store.serverStates.flatMap { state in
+            state.snapshot?.gpus.map { scopedGPUKey(serverID: state.id, gpuID: $0.id) } ?? []
+        }
     }
 
     private var language: AppInterfaceLanguage {
@@ -31,10 +33,10 @@ struct StatusMenuView: View {
             VStack(alignment: .leading, spacing: 10) {
                 headerStrip
 
-                if let snapshot = store.snapshot {
-                    gpuList(snapshot)
-                } else {
+                if store.serverStates.isEmpty {
                     emptyState
+                } else {
+                    serverList
                 }
 
                 if let noticeMessage = store.noticeMessage, store.settings.isConfigured {
@@ -59,7 +61,7 @@ struct StatusMenuView: View {
                 }
             )
         }
-        .scrollIndicators(.visible)
+        .scrollIndicators(.automatic)
         .frame(width: 480, alignment: .top)
         .background(Color(nsColor: .windowBackgroundColor))
         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: expandedGPUIds)
@@ -76,7 +78,7 @@ struct StatusMenuView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 Label(
-                    store.settings.isConfigured ? store.settings.sshTarget : t("No server configured", "서버 미설정"),
+                    headerTitle,
                     systemImage: "server.rack"
                 )
                 .font(.headline)
@@ -101,16 +103,17 @@ struct StatusMenuView: View {
                 }
             }
 
-            if let snapshot = store.snapshot {
-                let busyCount = snapshot.busyCount(using: store.settings)
+            if store.totalGPUCount > 0 {
                 HStack(spacing: 6) {
-                    SummaryPill(title: t("Avg", "평균"), value: "\(snapshot.averageUtilization)%")
-                    SummaryPill(title: t("Busy", "사용중"), value: "\(busyCount)/\(snapshot.gpus.count)")
-                    SummaryPill(title: t("Proc", "프로세스"), value: "\(snapshot.totalProcessCount)")
-                    UpdatedPill(date: snapshot.takenAt, language: language)
+                    SummaryPill(title: t("Avg", "평균"), value: "\(store.fleetAverageUtilization)%")
+                    SummaryPill(title: t("Busy", "사용중"), value: "\(store.fleetBusyCount)/\(store.totalGPUCount)")
+                    SummaryPill(title: t("Proc", "프로세스"), value: "\(store.totalProcessCount)")
+                    if let latestSnapshotDate = store.latestSnapshotDate {
+                        UpdatedPill(date: latestSnapshotDate, language: language)
+                    }
                 }
             } else {
-                Text(store.settings.isConfigured ? t("Waiting for the first polling result.", "첫 polling 결과를 기다리는 중입니다.") : t("Right-click the menu bar item and open Settings to configure a server.", "우클릭 메뉴에서 Settings를 열어 서버를 설정하세요."))
+                Text(headerEmptyStateText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -119,7 +122,7 @@ struct StatusMenuView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
-            if store.shouldHighlightMyProcesses, let detectedSSHUsername = store.detectedSSHUsername {
+            if store.shouldHighlightMyProcesses, store.configuredServerCount == 1, let detectedSSHUsername = store.detectedSSHUsername {
                 Label(
                     t("My processes: \(detectedSSHUsername)", "내 프로세스: \(detectedSSHUsername)"),
                     systemImage: "person.crop.circle.badge.checkmark"
@@ -145,35 +148,148 @@ struct StatusMenuView: View {
         )
     }
 
-    private func gpuList(_ snapshot: GPUSnapshot) -> some View {
+    private var headerTitle: String {
+        guard store.settings.isConfigured else {
+            return t("No server configured", "서버 미설정")
+        }
+
+        if store.configuredServerCount == 1, let server = store.serverStates.first?.server {
+            return server.displayName
+        }
+
+        return t("\(store.pollableServerCount)/\(store.configuredServerCount) servers", "\(store.pollableServerCount)/\(store.configuredServerCount) 서버")
+    }
+
+    private var headerEmptyStateText: String {
+        if !store.settings.isConfigured {
+            return t("Right-click the menu bar item and open Settings to configure a server.", "우클릭 메뉴에서 Settings를 열어 서버를 설정하세요.")
+        }
+
+        if store.pollableServerCount == 0 {
+            return t("No enabled server is ready for polling.", "Polling할 활성 서버가 없습니다.")
+        }
+
+        return t("Waiting for the first polling result.", "첫 polling 결과를 기다리는 중입니다.")
+    }
+
+    private var serverList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(store.serverStates) { state in
+                serverSection(state)
+            }
+        }
+    }
+
+    private func serverSection(_ state: ServerRuntimeState) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label(state.server.displayName, systemImage: state.server.isEnabled ? "server.rack" : "pause.circle")
+                    .font(.subheadline.weight(.semibold))
+
+                if !state.server.isEnabled {
+                    Text(t("Disabled", "비활성"))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.primary.opacity(0.08))
+                        )
+                }
+
+                Spacer(minLength: 8)
+
+                if state.server.isPollable {
+                    Button {
+                        store.refreshNow(serverID: state.id)
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.primary)
+                    .help(t("Refresh this server now", "이 서버를 지금 새로고침"))
+                }
+
+                if state.isRefreshing {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            if let snapshot = state.snapshot {
+                HStack(spacing: 6) {
+                    SummaryPill(title: t("Avg", "평균"), value: "\(snapshot.averageUtilization)%")
+                    SummaryPill(title: t("Busy", "사용중"), value: "\(snapshot.busyCount(using: store.settings))/\(snapshot.gpus.count)")
+                    SummaryPill(title: t("Proc", "프로세스"), value: "\(snapshot.totalProcessCount)")
+                    UpdatedPill(date: snapshot.takenAt, language: language)
+                }
+
+                gpuList(state, snapshot: snapshot)
+            } else if state.server.isEnabled {
+                Text(state.lastErrorMessage ?? t("Waiting for the first polling result.", "첫 polling 결과를 기다리는 중입니다."))
+                    .font(.caption)
+                    .foregroundStyle(state.lastErrorMessage == nil ? Color.secondary : Color.orange)
+            } else {
+                Text(t("This server is disabled in Settings.", "이 서버는 Settings에서 비활성화되어 있습니다."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if state.snapshot != nil, let lastErrorMessage = state.lastErrorMessage {
+                Text(lastErrorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            if store.shouldHighlightMyProcesses, store.configuredServerCount > 1, let detectedSSHUsername = state.detectedSSHUsername {
+                Label(
+                    t("My processes: \(detectedSSHUsername)", "내 프로세스: \(detectedSSHUsername)"),
+                    systemImage: "person.crop.circle.badge.checkmark"
+                )
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.green)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+    }
+
+    private func gpuList(_ state: ServerRuntimeState, snapshot: GPUSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(snapshot.gpus) { gpu in
-                let isExpanded = expandedGPUIds.contains(gpu.id)
-                let isLoadingDetails = store.isLoadingProcessDetails(for: gpu.id)
+                let gpuKey = scopedGPUKey(serverID: state.id, gpuID: gpu.id)
+                let isExpanded = expandedGPUIds.contains(gpuKey)
+                let isLoadingDetails = store.isLoadingProcessDetails(for: gpu.id, on: state.id)
                 GPUListRow(
                     gpu: gpu,
                     isExpanded: isExpanded,
                     isLoadingDetails: isLoadingDetails,
-                    hasCurrentUserProcess: store.hasCurrentUserProcess(on: gpu),
-                    isWatchingIdle: store.isWatchingIdle(for: gpu),
+                    hasCurrentUserProcess: store.hasCurrentUserProcess(on: gpu, on: state.id),
+                    isWatchingIdle: store.isWatchingIdle(for: gpu, on: state.id),
                     isWatchingProcessExit: { process in
-                        store.isWatchingExit(for: process)
+                        store.isWatchingExit(for: process, on: state.id)
                     },
                     isCurrentUserProcess: { process in
-                        store.isCurrentUserProcess(process)
+                        store.isCurrentUserProcess(process, on: state.id)
                     },
                     toggleIdleWatch: {
-                        store.toggleIdleWatch(for: gpu)
+                        store.toggleIdleWatch(for: gpu, serverID: state.id)
                     },
                     toggleProcessExitWatch: { process in
-                        store.toggleExitWatch(for: process, on: gpu)
+                        store.toggleExitWatch(for: process, on: gpu, serverID: state.id)
                     },
                     toggleExpansion: {
-                        let willExpand = !expandedGPUIds.contains(gpu.id)
-                        toggleExpansion(for: gpu.id)
+                        let willExpand = !expandedGPUIds.contains(gpuKey)
+                        toggleExpansion(for: gpuKey)
 
                         if willExpand {
-                            store.loadProcessDetails(for: gpu.id)
+                            store.loadProcessDetails(for: gpu.id, on: state.id)
                         }
                     }
                 )
@@ -189,12 +305,16 @@ struct StatusMenuView: View {
             .padding(.vertical, 12)
     }
 
-    private func toggleExpansion(for gpuId: Int) {
-        if expandedGPUIds.contains(gpuId) {
-            expandedGPUIds.remove(gpuId)
+    private func toggleExpansion(for gpuKey: String) {
+        if expandedGPUIds.contains(gpuKey) {
+            expandedGPUIds.remove(gpuKey)
         } else {
-            expandedGPUIds.insert(gpuId)
+            expandedGPUIds.insert(gpuKey)
         }
+    }
+
+    private func scopedGPUKey(serverID: String, gpuID: Int) -> String {
+        "\(serverID):\(gpuID)"
     }
 
     private var watchSummaryText: String {

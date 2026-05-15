@@ -4,13 +4,13 @@ import Security
 
 struct SSHPasswordStore {
     private let service = "com.leejaein.NVBeacon.ssh-password"
-    private let account = "current"
+    static let legacyAccount = "current"
 
-    func hasPasswordWithoutPrompt() -> Bool {
+    func hasPasswordWithoutPrompt(account: String = Self.legacyAccount) -> Bool {
         let context = LAContext()
         context.interactionNotAllowed = true
 
-        var query = baseQuery
+        var query = baseQuery(account: account)
         query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         query[kSecUseAuthenticationContext as String] = context
@@ -28,8 +28,8 @@ struct SSHPasswordStore {
         }
     }
 
-    func loadPassword() throws -> String {
-        var query = baseQuery
+    func loadPassword(account: String = Self.legacyAccount) throws -> String {
+        var query = baseQuery(account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -53,23 +53,23 @@ struct SSHPasswordStore {
         }
     }
 
-    func savePassword(_ password: String?) throws {
+    func savePassword(_ password: String?, account: String = Self.legacyAccount) throws {
         let trimmed = password?.trimmingCharacters(in: .newlines) ?? ""
 
         guard !trimmed.isEmpty else {
-            try deletePassword()
+            try deletePassword(account: account)
             return
         }
 
         let data = Data(trimmed.utf8)
         let attributes = [kSecValueData as String: data]
-        let status = SecItemUpdate(baseQuery as CFDictionary, attributes as CFDictionary)
+        let status = SecItemUpdate(baseQuery(account: account) as CFDictionary, attributes as CFDictionary)
 
         switch status {
         case errSecSuccess:
             return
         case errSecItemNotFound:
-            var query = baseQuery
+            var query = baseQuery(account: account)
             query[kSecValueData as String] = data
 
             let addStatus = SecItemAdd(query as CFDictionary, nil)
@@ -81,14 +81,14 @@ struct SSHPasswordStore {
         }
     }
 
-    func deletePassword() throws {
-        let status = SecItemDelete(baseQuery as CFDictionary)
+    func deletePassword(account: String = Self.legacyAccount) throws {
+        let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw PasswordStoreError.osStatus(status)
         }
     }
 
-    private var baseQuery: [String: Any] {
+    private func baseQuery(account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

@@ -188,13 +188,22 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 
     private func updatePopoverSize() {
-        let gpuCount = max(store.snapshot?.gpus.count ?? 0, 1)
-        let fallbackHeight = CGFloat(150 + min(gpuCount, 8) * 84)
+        let gpuCount = max(store.totalGPUCount, 1)
+        let serverCount = max(store.configuredServerCount, 1)
+        let fallbackHeight = CGFloat(150 + min(gpuCount, 8) * 84 + min(serverCount, 4) * 42)
         let contentHeight = measuredContentHeight > 0 ? measuredContentHeight : fallbackHeight
-        let maxVisibleHeight = CGFloat(150 + 8 * 84)
-        let clampedHeight = gpuCount > 8 ? min(contentHeight, maxVisibleHeight) : contentHeight
-        let height = min(CGFloat(920), max(320, clampedHeight))
+        let maxHeight = maxPopoverHeight()
+        let minHeight = min(CGFloat(320), maxHeight)
+        let height = min(maxHeight, max(minHeight, contentHeight))
         popover.contentSize = NSSize(width: 500, height: height)
+    }
+
+    private func maxPopoverHeight() -> CGFloat {
+        let visibleFrameHeight = statusItem.button?.window?.screen?.visibleFrame.height
+            ?? NSScreen.main?.visibleFrame.height
+            ?? 920
+        let verticalMargin: CGFloat = 96
+        return max(320, min(1100, visibleFrameHeight - verticalMargin))
     }
 
     private func updateMeasuredContentHeight(_ height: CGFloat) {

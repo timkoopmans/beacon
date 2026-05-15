@@ -273,6 +273,65 @@ import Testing
     #expect(settings.idleMemoryThresholdMB == 50)
 }
 
+@Test func normalizesLegacySettingsIntoSingleServerConfig() {
+    let settings = AppSettings(
+        sshTarget: "gpu-prod",
+        sshPort: "2222",
+        sshIdentityFilePath: "/Users/test/.ssh/id_gpu",
+        sshAuthenticationMode: .passwordBased,
+        sshConnectionReuseMode: .newConnectionEachRefresh,
+        remoteCommand: AppSettings.legacyDefaultRemoteCommand
+    ).normalized()
+
+    let server = settings.configuredServers.first
+
+    #expect(settings.configuredServers.count == 1)
+    #expect(server?.id == "legacy-primary")
+    #expect(server?.sshTarget == "gpu-prod")
+    #expect(server?.sshPort == "2222")
+    #expect(server?.sshAuthenticationMode == .passwordBased)
+    #expect(server?.sshConnectionReuseMode == .newConnectionEachRefresh)
+    #expect(server?.remoteCommand == AppSettings.defaultRemoteCommand)
+    #expect(settings.sshTarget == "gpu-prod")
+    #expect(settings.pollableServers.count == 1)
+}
+
+@Test func keepsMultipleServerConfigsAndEnabledSubset() {
+    let enabledServer = ServerConfig(
+        id: "server-a",
+        name: "Box A",
+        sshTarget: "alice@gpu-a",
+        sshPort: "22",
+        sshIdentityFilePath: "/Users/test/.ssh/a",
+        sshAuthenticationMode: .keyBased,
+        sshConnectionReuseMode: .reuseWhenPossible,
+        isEnabled: true
+    )
+    let disabledServer = ServerConfig(
+        id: "server-b",
+        name: "Box B",
+        sshTarget: "bob@gpu-b",
+        sshPort: "2222",
+        sshIdentityFilePath: "/Users/test/.ssh/b",
+        sshAuthenticationMode: .passwordBased,
+        sshConnectionReuseMode: .newConnectionEachRefresh,
+        isEnabled: false
+    )
+
+    let settings = AppSettings(servers: [enabledServer, disabledServer]).normalized()
+
+    #expect(settings.configuredServers.map(\.id) == ["server-a", "server-b"])
+    #expect(settings.pollableServers.map(\.id) == ["server-a"])
+    #expect(settings.sshTarget == "alice@gpu-a")
+    #expect(settings.sshPort == "22")
+
+    let connectionSettings = disabledServer.connectionSettings(from: settings)
+    #expect(connectionSettings.sshTarget == "bob@gpu-b")
+    #expect(connectionSettings.sshPort == "2222")
+    #expect(connectionSettings.sshAuthenticationMode == .passwordBased)
+    #expect(connectionSettings.sshConnectionReuseMode == .newConnectionEachRefresh)
+}
+
 @Test func menuBarDisplayModesBuildExpectedSummary() {
     let settings = AppSettings(
         busyDetectionMode: .activeProcess
@@ -307,6 +366,40 @@ import Testing
     #expect(MenuBarDisplayMode.averageOnly.titleText(for: snapshot, settings: settings, language: .english) == "GPU 50%")
     #expect(MenuBarDisplayMode.busyOnly.titleText(for: snapshot, settings: settings, language: .english) == "GPU 2/2")
     #expect(MenuBarDisplayMode.iconOnly.titleText(for: snapshot, settings: settings, language: .english).isEmpty)
+}
+
+@Test func serverScopedWatchesUseServerIdentity() {
+    let server = ServerConfig(
+        id: "server-a",
+        name: "A100 Lab",
+        sshTarget: "alice@gpu-a"
+    )
+    let gpu = GPUReading(
+        index: 0,
+        name: "A100",
+        uuid: "GPU-A",
+        utilization: 90,
+        memoryUsedMB: 10,
+        memoryTotalMB: 20,
+        temperatureCelsius: 60,
+        processes: []
+    )
+    let process = GPUProcessReading(
+        gpuUUID: "GPU-A",
+        pid: 1234,
+        processName: "python",
+        usedGPUMemoryMB: 8192,
+        user: "alice",
+        commandLine: "python train.py"
+    )
+
+    let processWatch = ProcessExitWatch(server: server, gpu: gpu, process: process)
+    let idleWatch = GPUIdleWatch(server: server, gpu: gpu)
+
+    #expect(processWatch.connectionFingerprint == server.connectionFingerprint)
+    #expect(processWatch.connectionLabel == "A100 Lab")
+    #expect(idleWatch.connectionFingerprint == server.connectionFingerprint)
+    #expect(idleWatch.connectionLabel == "A100 Lab")
 }
 
 @Test func exitWatchDoesNotFireWhileProcessIsStillVisible() {
