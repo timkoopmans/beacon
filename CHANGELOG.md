@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0 - 2026-05-15
+
+- Added multi-server GPU monitoring with per-server SSH target, authentication, connection reuse, enable/disable state, and remote command settings.
+- Updated the menu bar popover to show all configured servers in order with per-server refresh, status, GPU rows, and adaptive height.
+- Redesigned Settings server management with server ordering, saved host import, and selected-server editing.
+- Stored password-based SSH credentials per server in Keychain while preserving legacy single-server migration behavior.
+- Thanks @Liskie for contributing the multi-server monitoring implementation in #3.
+
 ## 0.4.2 - 2026-04-13
 
 - Fixed the launch-at-login setting so packaged builds show a configurable `Off` state instead of incorrectly appearing unavailable.
