@@ -4,6 +4,9 @@ struct SSHMetricsFetcher: Sendable {
     static let processDetailsCommand = "nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits"
     private static let processSectionSeparator = "__GPUUSAGE_PROCESS_SECTION__"
     private static let psSectionSeparator = "__GPUUSAGE_PS_SECTION__"
+    private static let hostStatsSectionSeparator = "__GPUUSAGE_HOST_SECTION__"
+    private static let slurmSectionSeparator = "__GPUUSAGE_SLURM_SECTION__"
+    private static let slurmJobsSeparator = "__GPUUSAGE_SLURM_JOBS__"
     private static let controlSocketPath = "/tmp/nvbeacon-ssh-%C.sock"
 
     enum FetchError: LocalizedError, Equatable {
@@ -54,7 +57,12 @@ struct SSHMetricsFetcher: Sendable {
             password: password
         )
         let gpus = try Self.parseSnapshot(output)
-        return GPUSnapshot(takenAt: Date(), gpus: gpus)
+        return GPUSnapshot(
+            takenAt: Date(),
+            gpus: gpus,
+            hostStats: Self.parseHostStatsSection(Self.section(named: Self.hostStatsSectionSeparator, from: output)),
+            slurmStatus: Self.parseSlurmSection(Self.section(named: Self.slurmSectionSeparator, from: output))
+        )
     }
 
     func fetchProcessDetails(
@@ -241,6 +249,107 @@ struct SSHMetricsFetcher: Sendable {
             .map { String($0) }
 
         return try lines.map(parseDetailedPSLine(_:))
+    }
+
+    static func parseHostStatsSection(_ output: String) -> HostStats? {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let line = trimmed.split(whereSeparator: \.isNewline).first else {
+            return nil
+        }
+
+        let columns = line
+            .split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+        guard columns.count >= 6,
+              let cpuCoreCount = Int(columns[0]),
+              let loadAverage1 = Double(columns[1]),
+              let loadAverage5 = Double(columns[2]),
+              let loadAverage15 = Double(columns[3]),
+              let memoryTotalMB = Int(columns[4]),
+              let memoryAvailableMB = Int(columns[5]),
+              cpuCoreCount > 0 || memoryTotalMB > 0 else {
+            return nil
+        }
+
+        let hostname = columns.count >= 7 ? columns[6] : ""
+        return HostStats(
+            cpuCoreCount: cpuCoreCount,
+            loadAverage1: loadAverage1,
+            loadAverage5: loadAverage5,
+            loadAverage15: loadAverage15,
+            memoryTotalMB: memoryTotalMB,
+            memoryAvailableMB: memoryAvailableMB,
+            hostname: hostname.isEmpty ? nil : hostname
+        )
+    }
+
+    static func parseSlurmSection(_ output: String) -> SlurmStatus? {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        let nodesText: String
+        let jobsText: String
+
+        if let jobsRange = trimmed.range(of: slurmJobsSeparator) {
+            nodesText = String(trimmed[..<jobsRange.lowerBound])
+            jobsText = String(trimmed[jobsRange.upperBound...])
+        } else {
+            nodesText = trimmed
+            jobsText = ""
+        }
+
+        let nodes = nodesText
+            .split(whereSeparator: \.isNewline)
+            .compactMap(parseSlurmNodeLine(_:))
+        let jobs = jobsText
+            .split(whereSeparator: \.isNewline)
+            .compactMap(parseSlurmJobLine(_:))
+
+        guard !nodes.isEmpty || !jobs.isEmpty else {
+            return nil
+        }
+
+        return SlurmStatus(nodes: nodes, jobs: jobs)
+    }
+
+    private static func parseSlurmNodeLine(_ line: Substring) -> SlurmNode? {
+        let columns = line
+            .split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+        guard columns.count >= 3, !columns[0].isEmpty else {
+            return nil
+        }
+
+        return SlurmNode(
+            name: columns[0],
+            partition: columns[1],
+            state: columns[2]
+        )
+    }
+
+    private static func parseSlurmJobLine(_ line: Substring) -> SlurmJob? {
+        let columns = line
+            .split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+        guard columns.count >= 8, !columns[0].isEmpty else {
+            return nil
+        }
+
+        return SlurmJob(
+            jobID: columns[0],
+            partition: columns[1],
+            name: columns[2],
+            user: columns[3],
+            state: columns[4],
+            elapsedTime: columns[5],
+            nodeCount: Int(columns[6]) ?? 0,
+            nodeListOrReason: columns[7...].joined(separator: "|")
+        )
     }
 
     private func runSSHCommand(
@@ -514,6 +623,19 @@ struct SSHMetricsFetcher: Sendable {
           [ -n "$real_uid" ] || continue
           printf '%s,%s,%s,%s,%s\\n' "$gpu_uuid" "$pid" "$real_uid" "$pname" "$used_mem"
         done
+        printf '\\n\(hostStatsSectionSeparator)\\n'
+        host_cpus="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
+        host_load="$(cut -d ' ' -f 1-3 /proc/loadavg 2>/dev/null || uptime 2>/dev/null | sed 's/.*load average[s]*: *//; s/,/ /g' || echo '0 0 0')"
+        set -- $host_load
+        host_mem="$(awk '/^MemTotal:/ {total=$2} /^MemAvailable:/ {avail=$2} END {printf "%d %d", total/1024, avail/1024}' /proc/meminfo 2>/dev/null || echo '0 0')"
+        host_name="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo '')"
+        printf '%s,%s,%s,%s,%s,%s\\n' "$host_cpus" "${1:-0}" "${2:-0}" "${3:-0}" "$(printf '%s' "$host_mem" | tr ' ' ',')" "$host_name"
+        printf '\\n\(slurmSectionSeparator)\\n'
+        if command -v squeue >/dev/null 2>&1; then
+          sinfo -N -h -o '%N|%P|%t' 2>/dev/null || true
+          printf '\\n\(slurmJobsSeparator)\\n'
+          squeue -h -o '%i|%P|%j|%u|%T|%M|%D|%R' 2>/dev/null || true
+        fi
         """
     }
 
@@ -556,7 +678,7 @@ struct SSHMetricsFetcher: Sendable {
     }
 
     private static func section(named name: String?, from output: String) -> String {
-        let separators = [processSectionSeparator, psSectionSeparator]
+        let separators = [processSectionSeparator, psSectionSeparator, hostStatsSectionSeparator, slurmSectionSeparator]
 
         if let name {
             guard let startRange = output.range(of: name) else {

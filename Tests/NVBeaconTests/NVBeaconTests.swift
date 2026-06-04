@@ -40,6 +40,70 @@ import Testing
     #expect(gpus[1].processes.isEmpty)
 }
 
+@Test func parsesHostStatsSection() throws {
+    let hostStats = SSHMetricsFetcher.parseHostStatsSection("64,12.50,10.20,8.75,257562,201310,node01")
+
+    let unwrapped = try #require(hostStats)
+    #expect(unwrapped.cpuCoreCount == 64)
+    #expect(unwrapped.loadAverage1 == 12.5)
+    #expect(unwrapped.loadAverage15 == 8.75)
+    #expect(unwrapped.memoryTotalMB == 257562)
+    #expect(unwrapped.memoryUsedMB == 56252)
+    #expect(unwrapped.memoryUsagePercent == 22)
+    #expect(unwrapped.hostname == "node01")
+
+    // Hostname column is optional for backward compatibility.
+    #expect(SSHMetricsFetcher.parseHostStatsSection("64,1,1,1,1000,500")?.hostname == nil)
+}
+
+@Test func hostStatsSectionRejectsMalformedOrEmptyOutput() {
+    #expect(SSHMetricsFetcher.parseHostStatsSection("") == nil)
+    #expect(SSHMetricsFetcher.parseHostStatsSection("garbage") == nil)
+    #expect(SSHMetricsFetcher.parseHostStatsSection("0,0,0,0,0,0") == nil)
+}
+
+@Test func parsesSlurmNodesAndJobs() throws {
+    let output = """
+    node01|gpu*|mix
+    node01|debug|mix
+    node02|gpu*|alloc
+    node03|gpu*|idle
+    node04|gpu*|down*
+    __GPUUSAGE_SLURM_JOBS__
+    1234|gpu|train-llm|alice|RUNNING|2-03:11:02|2|node[01-02]
+    1240|gpu|eval-run|bob|PENDING|0:00|1|(Resources)
+    """
+
+    let status = try #require(SSHMetricsFetcher.parseSlurmSection(output))
+
+    #expect(status.nodes.count == 5)
+    #expect(status.jobs.count == 2)
+    #expect(status.runningJobCount == 1)
+    #expect(status.pendingJobCount == 1)
+    // node01 is in two partitions but must be counted once.
+    #expect(status.allocatedNodeCount == 2)
+    #expect(status.idleNodeCount == 1)
+    #expect(status.unavailableNodeCount == 1)
+    #expect(status.jobs[0].user == "alice")
+    #expect(status.jobs[0].elapsedTime == "2-03:11:02")
+    #expect(status.jobs[1].nodeListOrReason == "(Resources)")
+}
+
+@Test func matchesSlurmNodeToHostByShortHostname() throws {
+    let status = try #require(SSHMetricsFetcher.parseSlurmSection("node01|gpu*|mix\nnode02|gpu*|idle"))
+
+    #expect(status.node(matchingHostname: "node01")?.state == "mix")
+    #expect(status.node(matchingHostname: "NODE02.cluster.internal")?.state == "idle")
+    #expect(status.node(matchingHostname: "login01") == nil)
+    #expect(status.node(matchingHostname: nil) == nil)
+}
+
+@Test func slurmSectionIsOmittedWhenUnavailable() {
+    #expect(SSHMetricsFetcher.parseSlurmSection("") == nil)
+    #expect(SSHMetricsFetcher.parseSlurmSection("\n  \n") == nil)
+    #expect(SSHMetricsFetcher.parseSlurmSection("not slurm output") == nil)
+}
+
 @Test func summaryPollingKeepsProcessMetadataLazy() throws {
     let output = """
     0, NVIDIA RTX 6000 Ada Generation, GPU-111, 73, 12048, 49140, 65

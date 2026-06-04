@@ -13,6 +13,7 @@ struct StatusMenuView: View {
     @ObservedObject var store: NVBeaconStore
     let onContentHeightChange: (CGFloat) -> Void
     @State private var expandedGPUIds: Set<String> = []
+    @State private var isSlurmExpanded = false
 
     private var snapshotGPUIds: [String] {
         store.serverStates.flatMap { state in
@@ -36,6 +37,10 @@ struct StatusMenuView: View {
                 if store.serverStates.isEmpty {
                     emptyState
                 } else {
+                    if let slurmStatus = store.clusterSlurmStatus {
+                        slurmSection(slurmStatus)
+                    }
+
                     serverList
                 }
 
@@ -65,6 +70,7 @@ struct StatusMenuView: View {
         .frame(width: 480, alignment: .top)
         .background(Color(nsColor: .windowBackgroundColor))
         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: expandedGPUIds)
+        .animation(.spring(response: 0.26, dampingFraction: 0.86), value: isSlurmExpanded)
         .onChange(of: snapshotGPUIds) { _, newValue in
             expandedGPUIds.formIntersection(Set(newValue))
         }
@@ -108,9 +114,6 @@ struct StatusMenuView: View {
                     SummaryPill(title: t("Avg", "평균"), value: "\(store.fleetAverageUtilization)%")
                     SummaryPill(title: t("Busy", "사용중"), value: "\(store.fleetBusyCount)/\(store.totalGPUCount)")
                     SummaryPill(title: t("Proc", "프로세스"), value: "\(store.totalProcessCount)")
-                    if let latestSnapshotDate = store.latestSnapshotDate {
-                        UpdatedPill(date: latestSnapshotDate, language: language)
-                    }
                 }
             } else {
                 Text(headerEmptyStateText)
@@ -186,6 +189,10 @@ struct StatusMenuView: View {
                 Label(state.server.displayName, systemImage: state.server.isEnabled ? "server.rack" : "pause.circle")
                     .font(.subheadline.weight(.semibold))
 
+                if let node = store.clusterSlurmStatus?.node(matchingHostname: state.snapshot?.hostStats?.hostname) {
+                    SlurmNodeStateBadge(node: node)
+                }
+
                 if !state.server.isEnabled {
                     Text(t("Disabled", "비활성"))
                         .font(.caption2.weight(.semibold))
@@ -223,7 +230,10 @@ struct StatusMenuView: View {
                     SummaryPill(title: t("Avg", "평균"), value: "\(snapshot.averageUtilization)%")
                     SummaryPill(title: t("Busy", "사용중"), value: "\(snapshot.busyCount(using: store.settings))/\(snapshot.gpus.count)")
                     SummaryPill(title: t("Proc", "프로세스"), value: "\(snapshot.totalProcessCount)")
-                    UpdatedPill(date: snapshot.takenAt, language: language)
+                }
+
+                if let hostStats = snapshot.hostStats {
+                    hostStatsBars(hostStats)
                 }
 
                 gpuList(state, snapshot: snapshot)
@@ -257,6 +267,102 @@ struct StatusMenuView: View {
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Color(nsColor: .controlBackgroundColor))
+        )
+    }
+
+    private func hostStatsBars(_ hostStats: HostStats) -> some View {
+        HStack(spacing: 10) {
+            ThinMetricBar(
+                title: "CPU",
+                valueText: String(
+                    format: "load %.1f / %.1f / %.1f · %d cores",
+                    hostStats.loadAverage1,
+                    hostStats.loadAverage5,
+                    hostStats.loadAverage15,
+                    hostStats.cpuCoreCount
+                ),
+                ratio: hostStats.cpuLoadRatio,
+                tint: Color(red: 0.55, green: 0.35, blue: 0.92)
+            )
+
+            ThinMetricBar(
+                title: "Mem",
+                valueText: "\(hostStats.memoryUsagePercent)% · \(hostStats.memoryUsedMB)/\(hostStats.memoryTotalMB)MB",
+                ratio: hostStats.memoryUsageRatio,
+                tint: Color(red: 0.15, green: 0.68, blue: 0.55)
+            )
+        }
+        .padding(.horizontal, 2)
+    }
+
+    private var detectedUsernames: Set<String> {
+        Set(store.serverStates.compactMap { $0.detectedSSHUsername?.lowercased() })
+    }
+
+    private func slurmSection(_ slurmStatus: SlurmStatus) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                isSlurmExpanded.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "rectangle.split.3x1")
+                        .font(.system(size: 11, weight: .semibold))
+
+                    Text(t("Slurm cluster", "Slurm 클러스터"))
+                        .font(.subheadline.weight(.semibold))
+
+                    Spacer(minLength: 8)
+
+                    Image(systemName: isSlurmExpanded ? "chevron.up.circle.fill" : "chevron.down.circle.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(isSlurmExpanded ? .orange : .secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 6) {
+                SummaryPill(title: t("Running", "실행중"), value: "\(slurmStatus.runningJobCount)")
+                SummaryPill(title: t("Pending", "대기중"), value: "\(slurmStatus.pendingJobCount)")
+                SummaryPill(title: t("Idle nodes", "유휴 노드"), value: "\(slurmStatus.idleNodeCount)")
+                SummaryPill(title: t("Busy nodes", "사용 노드"), value: "\(slurmStatus.allocatedNodeCount)")
+                if slurmStatus.unavailableNodeCount > 0 {
+                    SummaryPill(title: t("Down", "다운"), value: "\(slurmStatus.unavailableNodeCount)")
+                }
+            }
+
+            if isSlurmExpanded {
+                Divider()
+
+                VStack(alignment: .leading, spacing: 6) {
+                    if slurmStatus.jobs.isEmpty {
+                        Text(t("The job queue is empty.", "Job queue가 비어 있습니다."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(slurmStatus.jobs) { job in
+                            SlurmJobRow(
+                                job: job,
+                                isCurrentUserJob: detectedUsernames.contains(job.user.lowercased())
+                            )
+                        }
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
+                    isSlurmExpanded ? Color.orange.opacity(0.42) : Color.primary.opacity(0.05),
+                    lineWidth: 1
+                )
         )
     }
 
@@ -491,6 +597,107 @@ private struct GPUListRow: View {
     }
 }
 
+private struct SlurmNodeStateBadge: View {
+    let node: SlurmNode
+
+    private var tint: Color {
+        if node.isUnavailable { return .red }
+        if node.isAllocated { return .orange }
+        if node.isIdle { return .green }
+        return .secondary
+    }
+
+    var body: some View {
+        Text(node.state)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(tint.opacity(0.12))
+            )
+            .help("Slurm node \(node.name) · \(node.partition)")
+    }
+}
+
+private struct SlurmJobRow: View {
+    let job: SlurmJob
+    let isCurrentUserJob: Bool
+    private let userColumnWidth: CGFloat = 52
+    private let language = AppLocalizer.currentLanguage()
+
+    private var stateTint: Color {
+        switch job.state {
+        case "RUNNING": return .green
+        case "PENDING": return .orange
+        case "COMPLETING", "CONFIGURING": return .blue
+        default: return .secondary
+        }
+    }
+
+    private var stateLabel: String {
+        switch job.state {
+        case "RUNNING": return language.text("Run", "실행")
+        case "PENDING": return language.text("Pend", "대기")
+        default: return job.state.prefix(1) + job.state.dropFirst().lowercased()
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(job.user)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(isCurrentUserJob ? .green : .secondary)
+                .lineLimit(1)
+                .frame(width: userColumnWidth, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(job.name)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Text(stateLabel)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(stateTint)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(stateTint.opacity(0.12))
+                        )
+                }
+
+                Text("\(job.jobID) · \(job.partition) · \(job.nodeCount)n · \(job.nodeListOrReason)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 8)
+
+            Text(job.elapsedTime)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill((isCurrentUserJob ? Color.green : Color(nsColor: .windowBackgroundColor)).opacity(isCurrentUserJob ? 0.08 : 1))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(isCurrentUserJob ? Color.green.opacity(0.22) : .clear, lineWidth: 1)
+        )
+    }
+}
+
 private struct SummaryPill: View {
     let title: String
     let value: String
@@ -511,30 +718,6 @@ private struct SummaryPill: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Color.primary.opacity(0.05))
         )
-    }
-}
-
-private struct UpdatedPill: View {
-    let date: Date
-    let language: AppInterfaceLanguage
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            SummaryPill(title: language.text("Updated", "업데이트"), value: relativeText(referenceDate: context.date))
-                .help(date.formatted(date: .omitted, time: .standard))
-        }
-    }
-
-    private func relativeText(referenceDate: Date) -> String {
-        let seconds = max(Int(referenceDate.timeIntervalSince(date)), 0)
-
-        if seconds < 60 {
-            return "\(seconds)s"
-        }
-
-        let minutes = seconds / 60
-        let remainingSeconds = seconds % 60
-        return "\(minutes)m \(remainingSeconds)s"
     }
 }
 

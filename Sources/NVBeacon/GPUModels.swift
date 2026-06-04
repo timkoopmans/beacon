@@ -794,9 +794,133 @@ struct GPUReading: Identifiable, Equatable, Sendable {
     }
 }
 
+struct HostStats: Equatable, Sendable {
+    let cpuCoreCount: Int
+    let loadAverage1: Double
+    let loadAverage5: Double
+    let loadAverage15: Double
+    let memoryTotalMB: Int
+    let memoryAvailableMB: Int
+    var hostname: String?
+
+    var memoryUsedMB: Int {
+        max(memoryTotalMB - memoryAvailableMB, 0)
+    }
+
+    var memoryUsageRatio: Double {
+        guard memoryTotalMB > 0 else { return 0 }
+        return Double(memoryUsedMB) / Double(memoryTotalMB)
+    }
+
+    var memoryUsagePercent: Int {
+        Int((memoryUsageRatio * 100).rounded())
+    }
+
+    var cpuLoadRatio: Double {
+        guard cpuCoreCount > 0 else { return 0 }
+        return loadAverage1 / Double(cpuCoreCount)
+    }
+}
+
+struct SlurmNode: Equatable, Sendable, Identifiable {
+    let name: String
+    let partition: String
+    let state: String
+
+    // sinfo -N emits one row per node+partition combination.
+    var id: String { "\(name)|\(partition)" }
+
+    var isAllocated: Bool {
+        ["alloc", "mix"].contains { state.lowercased().contains($0) }
+    }
+
+    var isIdle: Bool {
+        state.lowercased().contains("idle")
+    }
+
+    var isUnavailable: Bool {
+        ["down", "drain", "drng", "fail", "maint"].contains { state.lowercased().contains($0) }
+    }
+}
+
+struct SlurmJob: Equatable, Sendable, Identifiable {
+    let jobID: String
+    let partition: String
+    let name: String
+    let user: String
+    let state: String
+    let elapsedTime: String
+    let nodeCount: Int
+    let nodeListOrReason: String
+
+    var id: String { jobID }
+
+    var isRunning: Bool { state == "RUNNING" }
+    var isPending: Bool { state == "PENDING" }
+}
+
+struct SlurmStatus: Equatable, Sendable {
+    let nodes: [SlurmNode]
+    let jobs: [SlurmJob]
+
+    var runningJobCount: Int {
+        jobs.filter(\.isRunning).count
+    }
+
+    var pendingJobCount: Int {
+        jobs.filter(\.isPending).count
+    }
+
+    var otherJobCount: Int {
+        jobs.count - runningJobCount - pendingJobCount
+    }
+
+    // A node can appear once per partition; count each node once.
+    private var uniqueNodes: [SlurmNode] {
+        var seen = Set<String>()
+        return nodes.filter { seen.insert($0.name).inserted }
+    }
+
+    var allocatedNodeCount: Int {
+        uniqueNodes.filter(\.isAllocated).count
+    }
+
+    var idleNodeCount: Int {
+        uniqueNodes.filter(\.isIdle).count
+    }
+
+    var unavailableNodeCount: Int {
+        uniqueNodes.filter(\.isUnavailable).count
+    }
+
+    func node(matchingHostname hostname: String?) -> SlurmNode? {
+        guard let hostname else { return nil }
+
+        let shortName = hostname
+            .split(separator: ".")
+            .first
+            .map { $0.lowercased() }
+
+        guard let shortName, !shortName.isEmpty else { return nil }
+
+        return nodes.first { node in
+            node.name.lowercased().split(separator: ".").first.map(String.init) == shortName
+        }
+    }
+}
+
 struct GPUSnapshot: Equatable, Sendable {
     let takenAt: Date
     let gpus: [GPUReading]
+    var hostStats: HostStats?
+    var slurmStatus: SlurmStatus?
+
+    init(takenAt: Date, gpus: [GPUReading], hostStats: HostStats? = nil, slurmStatus: SlurmStatus? = nil) {
+        self.takenAt = takenAt
+        self.gpus = gpus
+        self.hostStats = hostStats
+        self.slurmStatus = slurmStatus
+    }
 
     var averageUtilization: Int {
         guard !gpus.isEmpty else { return 0 }
@@ -847,7 +971,7 @@ struct GPUSnapshot: Equatable, Sendable {
             )
         }
 
-        return GPUSnapshot(takenAt: takenAt, gpus: mergedGPUs)
+        return GPUSnapshot(takenAt: takenAt, gpus: mergedGPUs, hostStats: hostStats, slurmStatus: slurmStatus)
     }
 
     func applyingResolvedProcessMetadata(_ processes: [GPUProcessReading]) -> GPUSnapshot {
@@ -875,7 +999,7 @@ struct GPUSnapshot: Equatable, Sendable {
             )
         }
 
-        return GPUSnapshot(takenAt: takenAt, gpus: updatedGPUs)
+        return GPUSnapshot(takenAt: takenAt, gpus: updatedGPUs, hostStats: hostStats, slurmStatus: slurmStatus)
     }
 }
 

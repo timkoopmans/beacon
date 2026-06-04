@@ -241,6 +241,16 @@ final class NVBeaconStore: ObservableObject {
         serverStates.compactMap { $0.snapshot?.takenAt }.max()
     }
 
+    var clusterSlurmStatus: SlurmStatus? {
+        serverStates
+            .compactMap { state -> (takenAt: Date, status: SlurmStatus)? in
+                guard let snapshot = state.snapshot, let slurmStatus = snapshot.slurmStatus else { return nil }
+                return (snapshot.takenAt, slurmStatus)
+            }
+            .max { $0.takenAt < $1.takenAt }?
+            .status
+    }
+
     private var hasServerError: Bool {
         serverStates.contains { $0.lastErrorMessage != nil }
     }
@@ -951,7 +961,12 @@ final class NVBeaconStore: ObservableObject {
         }
 
         updateServerState(serverID) { state in
-            state.snapshot = GPUSnapshot(takenAt: currentSnapshot.takenAt, gpus: updatedGPUs)
+            state.snapshot = GPUSnapshot(
+                takenAt: currentSnapshot.takenAt,
+                gpus: updatedGPUs,
+                hostStats: currentSnapshot.hostStats,
+                slurmStatus: currentSnapshot.slurmStatus
+            )
         }
     }
 
