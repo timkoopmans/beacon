@@ -14,6 +14,7 @@ struct StatusMenuView: View {
     let onContentHeightChange: (CGFloat) -> Void
     @State private var expandedGPUIds: Set<String> = []
     @State private var isSlurmExpanded = false
+    @State private var expandedHostServerIds: Set<String> = []
 
     private var snapshotGPUIds: [String] {
         store.serverStates.flatMap { state in
@@ -71,6 +72,7 @@ struct StatusMenuView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: expandedGPUIds)
         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: isSlurmExpanded)
+        .animation(.spring(response: 0.26, dampingFraction: 0.86), value: expandedHostServerIds)
         .onChange(of: snapshotGPUIds) { _, newValue in
             expandedGPUIds.formIntersection(Set(newValue))
         }
@@ -109,13 +111,7 @@ struct StatusMenuView: View {
                 }
             }
 
-            if store.totalGPUCount > 0 {
-                HStack(spacing: 6) {
-                    SummaryPill(title: t("Avg", "평균"), value: "\(store.fleetAverageUtilization)%")
-                    SummaryPill(title: t("Busy", "사용중"), value: "\(store.fleetBusyCount)/\(store.totalGPUCount)")
-                    SummaryPill(title: t("Proc", "프로세스"), value: "\(store.totalProcessCount)")
-                }
-            } else {
+            if store.totalGPUCount == 0 {
                 Text(headerEmptyStateText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -226,14 +222,8 @@ struct StatusMenuView: View {
             }
 
             if let snapshot = state.snapshot {
-                HStack(spacing: 6) {
-                    SummaryPill(title: t("Avg", "평균"), value: "\(snapshot.averageUtilization)%")
-                    SummaryPill(title: t("Busy", "사용중"), value: "\(snapshot.busyCount(using: store.settings))/\(snapshot.gpus.count)")
-                    SummaryPill(title: t("Proc", "프로세스"), value: "\(snapshot.totalProcessCount)")
-                }
-
                 if let hostStats = snapshot.hostStats {
-                    hostStatsBars(hostStats)
+                    hostStatsRow(hostStats, serverID: state.id)
                 }
 
                 gpuList(state, snapshot: snapshot)
@@ -270,29 +260,146 @@ struct StatusMenuView: View {
         )
     }
 
-    private func hostStatsBars(_ hostStats: HostStats) -> some View {
-        HStack(spacing: 10) {
-            ThinMetricBar(
-                title: "CPU",
-                valueText: String(
-                    format: "load %.1f / %.1f / %.1f · %d cores",
-                    hostStats.loadAverage1,
-                    hostStats.loadAverage5,
-                    hostStats.loadAverage15,
-                    hostStats.cpuCoreCount
-                ),
-                ratio: hostStats.cpuLoadRatio,
-                tint: Color(red: 0.55, green: 0.35, blue: 0.92)
-            )
-
-            ThinMetricBar(
-                title: "Mem",
-                valueText: "\(hostStats.memoryUsagePercent)% · \(hostStats.memoryUsedMB)/\(hostStats.memoryTotalMB)MB",
-                ratio: hostStats.memoryUsageRatio,
-                tint: Color(red: 0.15, green: 0.68, blue: 0.55)
-            )
+    private func hostHeaderSummary(_ hostStats: HostStats) -> String {
+        if let utilization = hostStats.cpuUtilizationPercent {
+            return "\(hostStats.cpuCoreCount) " + t("cores", "코어") + " · \(hostStats.memoryUsagePercent)% mem · \(utilization)%"
         }
-        .padding(.horizontal, 2)
+
+        return String(
+            format: "%d " + t("cores", "코어") + " · %d%% mem · load %.1f",
+            hostStats.cpuCoreCount,
+            hostStats.memoryUsagePercent,
+            hostStats.loadAverage1
+        )
+    }
+
+    private func hostStatsRow(_ hostStats: HostStats, serverID: String) -> some View {
+        let isExpanded = expandedHostServerIds.contains(serverID)
+
+        return VStack(alignment: .leading, spacing: 7) {
+            Button {
+                if isExpanded {
+                    expandedHostServerIds.remove(serverID)
+                } else {
+                    expandedHostServerIds.insert(serverID)
+                }
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("CPU")
+                        .font(.headline)
+
+                    if let hostname = hostStats.hostname {
+                        Text(hostname)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Text(hostHeaderSummary(hostStats))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .monospacedDigit()
+
+                    Image(systemName: isExpanded ? "chevron.up.circle.fill" : "chevron.down.circle.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(isExpanded ? .orange : .secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 10) {
+                if let utilization = hostStats.cpuUtilizationPercent {
+                    ThinMetricBar(
+                        title: "Util",
+                        valueText: "\(utilization)%",
+                        ratio: Double(utilization) / 100,
+                        tint: Color(red: 0.55, green: 0.35, blue: 0.92)
+                    )
+                } else {
+                    ThinMetricBar(
+                        title: "Util",
+                        valueText: String(
+                            format: "load %.1f / %.1f / %.1f",
+                            hostStats.loadAverage1,
+                            hostStats.loadAverage5,
+                            hostStats.loadAverage15
+                        ),
+                        ratio: hostStats.cpuLoadRatio,
+                        tint: Color(red: 0.55, green: 0.35, blue: 0.92)
+                    )
+                }
+
+                ThinMetricBar(
+                    title: "Memory",
+                    valueText: "\(hostStats.memoryUsagePercent)% · \(MemoryFormatter.gigabytes(fromMB: hostStats.memoryUsedMB)) / \(MemoryFormatter.gigabytes(fromMB: hostStats.memoryTotalMB))",
+                    ratio: hostStats.memoryUsageRatio,
+                    tint: Color(red: 0.15, green: 0.68, blue: 0.55)
+                )
+            }
+
+            if isExpanded {
+                Divider()
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(String(
+                        format: t("Load average %.1f / %.1f / %.1f", "Load average %.1f / %.1f / %.1f"),
+                        hostStats.loadAverage1,
+                        hostStats.loadAverage5,
+                        hostStats.loadAverage15
+                    ))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+
+                    if !hostStats.coreUtilizationPercents.isEmpty {
+                        LazyVGrid(
+                            columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4),
+                            alignment: .leading,
+                            spacing: 6
+                        ) {
+                            ForEach(Array(hostStats.coreUtilizationPercents.enumerated()), id: \.offset) { index, percent in
+                                ThinMetricBar(
+                                    title: "\(index)",
+                                    valueText: "\(percent)%",
+                                    ratio: Double(percent) / 100,
+                                    tint: Color(red: 0.55, green: 0.35, blue: 0.92)
+                                )
+                            }
+                        }
+                    }
+
+                    if !hostStats.topUserProcesses.isEmpty {
+                        Divider()
+
+                        Text(t("My processes", "내 프로세스"))
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+
+                        ForEach(hostStats.topUserProcesses) { process in
+                            HostProcessRow(process: process)
+                        }
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
+                    isExpanded ? Color.orange.opacity(0.42) : Color.primary.opacity(0.05),
+                    lineWidth: 1
+                )
+        )
     }
 
     private var detectedUsernames: Set<String> {
@@ -458,97 +565,106 @@ private struct GPUListRow: View {
         language.text(english, korean)
     }
 
+    private var processCountText: String {
+        let count = gpu.processes.count
+        return count == 1 ? t("1 proc", "1개 프로세스") : t("\(count) procs", "\(count)개 프로세스")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .top, spacing: 8) {
-                Button(action: toggleIdleWatch) {
-                    Image(systemName: isWatchingIdle ? "star.fill" : "star")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(isWatchingIdle ? Color.yellow : Color.secondary)
-                        .frame(width: 18, height: 18)
-                }
-                .buttonStyle(.plain)
-                .contentShape(Rectangle())
-                .help(isWatchingIdle ? t("Disable GPU idle alert", "GPU idle 알림 해제") : t("Enable GPU idle alert", "GPU idle 알림 받기"))
+            Button(action: toggleExpansion) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("GPU \(gpu.index)")
+                        .font(.headline)
 
-                Button(action: toggleExpansion) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text("GPU \(gpu.index)")
-                                .font(.headline)
+                    Text(gpu.name)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
 
-                            Text(gpu.name)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                    Spacer(minLength: 8)
 
-                            Spacer(minLength: 8)
-
-                            Text("\(gpu.temperatureSummary) · \(gpu.processes.count)p · \(gpu.utilization)%")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .monospacedDigit()
-
-                            if hasCurrentUserProcess {
-                                Text(t("Mine", "내 프로세스"))
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(.green)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(
-                                        Capsule(style: .continuous)
-                                            .fill(Color.green.opacity(0.12))
-                                    )
-                            }
-
-                            Image(systemName: isExpanded ? "chevron.up.circle.fill" : "chevron.down.circle.fill")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(isExpanded ? .orange : .secondary)
-                        }
-
-                        HStack(spacing: 10) {
-                            ThinMetricBar(
-                                title: "Util",
-                                valueText: "\(gpu.utilization)%",
-                                ratio: gpu.utilizationRatio,
-                                tint: Color(red: 0.93, green: 0.45, blue: 0.15)
-                            )
-
-                            ThinMetricBar(
-                                title: "Memory",
-                                valueText: "\(gpu.memoryUsagePercent)% · \(gpu.memoryUsedMB)/\(gpu.memoryTotalMB)MB",
-                                ratio: gpu.memoryUsageRatio,
-                                tint: Color(red: 0.12, green: 0.54, blue: 0.94)
-                            )
-                        }
+                    if isWatchingIdle {
+                        Image(systemName: "bell.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.orange)
+                            .help(t("Idle notification armed", "Idle 알림 설정됨"))
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+
+                    Text("\(gpu.temperatureSummary) · \(processCountText) · \(gpu.utilization)%")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .monospacedDigit()
+
+                    if hasCurrentUserProcess {
+                        Text(t("Mine", "내 프로세스"))
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.green)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Color.green.opacity(0.12))
+                            )
+                    }
+
+                    Image(systemName: isExpanded ? "chevron.up.circle.fill" : "chevron.down.circle.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(isExpanded ? .orange : .secondary)
                 }
-                .buttonStyle(.plain)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
 
-            if isWatchingIdle {
-                HStack(spacing: 0) {
-                    Color.clear
-                        .frame(width: 26, height: 1)
+            HStack(spacing: 10) {
+                ThinMetricBar(
+                    title: "Util",
+                    valueText: "\(gpu.utilization)%",
+                    ratio: gpu.utilizationRatio,
+                    tint: Color(red: 0.93, green: 0.45, blue: 0.15)
+                )
 
-                    Label(t("Idle notification armed", "Idle 알림 설정됨"), systemImage: "star.fill")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.yellow)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(Color.yellow.opacity(0.12))
-                        )
-                }
+                ThinMetricBar(
+                    title: "Memory",
+                    valueText: "\(gpu.memoryUsagePercent)% · \(gpu.memorySummary)",
+                    ratio: gpu.memoryUsageRatio,
+                    tint: Color(red: 0.12, green: 0.54, blue: 0.94)
+                )
             }
 
             if isExpanded {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Spacer(minLength: 8)
+
+                        Button(action: toggleIdleWatch) {
+                            HStack(spacing: 4) {
+                                Image(systemName: isWatchingIdle ? "bell.fill" : "bell")
+                                    .font(.system(size: 11, weight: .semibold))
+
+                                Text(isWatchingIdle ? t("Watching idle", "Idle 감시 중") : t("Notify when idle", "Idle 알림"))
+                                    .font(.caption2.weight(.semibold))
+                            }
+                            .foregroundStyle(isWatchingIdle ? Color.orange : Color.secondary)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill((isWatchingIdle ? Color.orange : Color.primary).opacity(isWatchingIdle ? 0.18 : 0.08))
+                            )
+                            .overlay(
+                                Capsule(style: .continuous)
+                                    .stroke((isWatchingIdle ? Color.orange : Color.primary).opacity(isWatchingIdle ? 0.35 : 0.12), lineWidth: 1)
+                            )
+                        }
+                        .contentShape(Capsule(style: .continuous))
+                        .buttonStyle(.plain)
+                        .animation(.easeInOut(duration: 0.16), value: isWatchingIdle)
+                        .help(isWatchingIdle ? t("Disable GPU idle alert", "GPU idle 알림 해제") : t("Enable GPU idle alert", "GPU idle 알림 받기"))
+                    }
+
                     if isLoadingDetails {
                         HStack(spacing: 6) {
                             ProgressView()
@@ -593,6 +709,40 @@ private struct GPUListRow: View {
                     isExpanded ? Color.orange.opacity(0.42) : (hasCurrentUserProcess ? Color.green.opacity(0.26) : Color.primary.opacity(0.05)),
                     lineWidth: 1
                 )
+        )
+    }
+}
+
+private struct HostProcessRow: View {
+    let process: HostProcessReading
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(process.displayName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Text("PID \(process.pid) · \(process.commandLine)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 8)
+
+            Text(String(format: "%.0f%% cpu · %.0f%% mem", process.cpuPercent, process.memoryPercent))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color(nsColor: .windowBackgroundColor))
         )
     }
 }

@@ -56,6 +56,43 @@ import Testing
     #expect(SSHMetricsFetcher.parseHostStatsSection("64,1,1,1,1000,500")?.hostname == nil)
 }
 
+@Test func parsesTopUserProcesses() throws {
+    let output = """
+    4,2.50,2.20,1.75,16000,8000,node01
+    42,90,15,60,3
+    __GPUUSAGE_HOST_PROCS__
+    1001 95.3  2.1 /usr/bin/python train.py --epochs 100
+    2002  1.0  0.5 -zsh
+    """
+
+    let hostStats = try #require(SSHMetricsFetcher.parseHostStatsSection(output))
+
+    #expect(hostStats.cpuUtilizationPercent == 42)
+    #expect(hostStats.topUserProcesses.count == 2)
+    #expect(hostStats.topUserProcesses[0].pid == 1001)
+    #expect(hostStats.topUserProcesses[0].cpuPercent == 95.3)
+    #expect(hostStats.topUserProcesses[0].displayName == "python")
+    #expect(hostStats.topUserProcesses[0].commandLine == "/usr/bin/python train.py --epochs 100")
+    #expect(hostStats.topUserProcesses[1].displayName == "-zsh")
+}
+
+@Test func parsesPerCoreCPUUtilization() throws {
+    let output = """
+    4,2.50,2.20,1.75,16000,8000,node01
+    42,90,15,60,3
+    """
+
+    let hostStats = try #require(SSHMetricsFetcher.parseHostStatsSection(output))
+
+    #expect(hostStats.cpuUtilizationPercent == 42)
+    #expect(hostStats.coreUtilizationPercents == [90, 15, 60, 3])
+
+    // Utilization line is optional.
+    let withoutUtilization = try #require(SSHMetricsFetcher.parseHostStatsSection("4,1,1,1,1000,500,node01"))
+    #expect(withoutUtilization.cpuUtilizationPercent == nil)
+    #expect(withoutUtilization.coreUtilizationPercents.isEmpty)
+}
+
 @Test func hostStatsSectionRejectsMalformedOrEmptyOutput() {
     #expect(SSHMetricsFetcher.parseHostStatsSection("") == nil)
     #expect(SSHMetricsFetcher.parseHostStatsSection("garbage") == nil)
@@ -325,10 +362,10 @@ import Testing
     #expect(settings.sshAuthenticationMode == .keyBased)
     #expect(settings.menuBarDisplayMode == .averageAndBusy)
     #expect(settings.languagePreference == .system)
-    #expect(settings.appearanceMode == .system)
+    #expect(settings.appearanceMode == .dark)
     #expect(settings.showsDockIcon == false)
     #expect(settings.closesPopoverOnOutsideClick == true)
-    #expect(settings.highlightsMyProcesses == true)
+    #expect(settings.highlightsMyProcesses == false)
     #expect(settings.sshConnectionReuseMode == .reuseWhenPossible)
     #expect(settings.busyDetectionMode == .activeProcess)
     #expect(settings.busyMemoryThresholdMB == 50)

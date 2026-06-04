@@ -5,6 +5,7 @@ struct SSHMetricsFetcher: Sendable {
     private static let processSectionSeparator = "__GPUUSAGE_PROCESS_SECTION__"
     private static let psSectionSeparator = "__GPUUSAGE_PS_SECTION__"
     private static let hostStatsSectionSeparator = "__GPUUSAGE_HOST_SECTION__"
+    private static let hostProcessesSeparator = "__GPUUSAGE_HOST_PROCS__"
     private static let slurmSectionSeparator = "__GPUUSAGE_SLURM_SECTION__"
     private static let slurmJobsSeparator = "__GPUUSAGE_SLURM_JOBS__"
     private static let controlSocketPath = "/tmp/nvbeacon-ssh-%C.sock"
@@ -252,8 +253,18 @@ struct SSHMetricsFetcher: Sendable {
     }
 
     static func parseHostStatsSection(_ output: String) -> HostStats? {
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let line = trimmed.split(whereSeparator: \.isNewline).first else {
+        var trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var topUserProcesses = [HostProcessReading]()
+        if let processesRange = trimmed.range(of: hostProcessesSeparator) {
+            topUserProcesses = trimmed[processesRange.upperBound...]
+                .split(whereSeparator: \.isNewline)
+                .compactMap(parseHostProcessLine(_:))
+            trimmed = String(trimmed[..<processesRange.lowerBound])
+        }
+
+        let lines = trimmed.split(whereSeparator: \.isNewline)
+        guard let line = lines.first else {
             return nil
         }
 
@@ -273,6 +284,20 @@ struct SSHMetricsFetcher: Sendable {
         }
 
         let hostname = columns.count >= 7 ? columns[6] : ""
+
+        // Optional second line: aggregate CPU busy % followed by per-core percentages.
+        var cpuUtilizationPercent: Int?
+        var coreUtilizationPercents = [Int]()
+        if lines.count >= 2 {
+            let utilizationColumns = lines[1]
+                .split(separator: ",", omittingEmptySubsequences: false)
+                .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            if let aggregate = utilizationColumns.first {
+                cpuUtilizationPercent = aggregate
+                coreUtilizationPercents = Array(utilizationColumns.dropFirst())
+            }
+        }
+
         return HostStats(
             cpuCoreCount: cpuCoreCount,
             loadAverage1: loadAverage1,
@@ -280,7 +305,30 @@ struct SSHMetricsFetcher: Sendable {
             loadAverage15: loadAverage15,
             memoryTotalMB: memoryTotalMB,
             memoryAvailableMB: memoryAvailableMB,
-            hostname: hostname.isEmpty ? nil : hostname
+            hostname: hostname.isEmpty ? nil : hostname,
+            cpuUtilizationPercent: cpuUtilizationPercent,
+            coreUtilizationPercents: coreUtilizationPercents,
+            topUserProcesses: topUserProcesses
+        )
+    }
+
+    private static func parseHostProcessLine(_ line: Substring) -> HostProcessReading? {
+        let columns = line
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(maxSplits: 3, omittingEmptySubsequences: true, whereSeparator: \.isWhitespace)
+
+        guard columns.count >= 4,
+              let pid = Int(columns[0]),
+              let cpuPercent = Double(columns[1]),
+              let memoryPercent = Double(columns[2]) else {
+            return nil
+        }
+
+        return HostProcessReading(
+            pid: pid,
+            cpuPercent: cpuPercent,
+            memoryPercent: memoryPercent,
+            commandLine: String(columns[3])
         )
     }
 
@@ -630,6 +678,28 @@ struct SSHMetricsFetcher: Sendable {
         host_mem="$(awk '/^MemTotal:/ {total=$2} /^MemAvailable:/ {avail=$2} END {printf "%d %d", total/1024, avail/1024}' /proc/meminfo 2>/dev/null || echo '0 0')"
         host_name="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo '')"
         printf '%s,%s,%s,%s,%s,%s\\n' "$host_cpus" "${1:-0}" "${2:-0}" "${3:-0}" "$(printf '%s' "$host_mem" | tr ' ' ',')" "$host_name"
+        { grep '^cpu' /proc/stat; sleep 0.5; grep '^cpu' /proc/stat; } 2>/dev/null | awk '
+        {
+          key=$1; total=0
+          for (i=2; i<=NF; i++) total+=$i
+          idle=$5+$6
+          if (key in t1) {
+            dt=total-t1[key]; di=idle-i1[key]
+            pct=(dt>0) ? 100*(dt-di)/dt : 0
+            out[key]=int(pct+0.5); order[n++]=key
+          } else {
+            t1[key]=total; i1[key]=idle
+          }
+        }
+        END {
+          if ("cpu" in out) {
+            line=out["cpu"]
+            for (j=0; j<n; j++) { k=order[j]; if (k!="cpu") line=line","out[k] }
+            print line
+          }
+        }'
+        printf '\(hostProcessesSeparator)\\n'
+        ps -u "$(id -un)" -o pid=,pcpu=,pmem=,args= --sort=-pcpu 2>/dev/null | head -n 5 || true
         printf '\\n\(slurmSectionSeparator)\\n'
         if command -v squeue >/dev/null 2>&1; then
           sinfo -N -h -o '%N|%P|%t' 2>/dev/null || true

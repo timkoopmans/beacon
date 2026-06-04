@@ -518,10 +518,10 @@ struct AppSettings: Codable, Equatable, Sendable {
     var remoteCommand: String = Self.defaultRemoteCommand
     var menuBarDisplayMode: MenuBarDisplayMode = .averageAndBusy
     var languagePreference: AppLanguagePreference = .system
-    var appearanceMode: AppAppearanceMode = .system
+    var appearanceMode: AppAppearanceMode = .dark
     var showsDockIcon: Bool = false
     var closesPopoverOnOutsideClick: Bool = true
-    var highlightsMyProcesses: Bool = true
+    var highlightsMyProcesses: Bool = false
     var idleNotificationSeconds: Int = 300
     var idleMemoryThresholdMB: Int = 50
 
@@ -539,10 +539,10 @@ struct AppSettings: Codable, Equatable, Sendable {
         remoteCommand: String = Self.defaultRemoteCommand,
         menuBarDisplayMode: MenuBarDisplayMode = .averageAndBusy,
         languagePreference: AppLanguagePreference = .system,
-        appearanceMode: AppAppearanceMode = .system,
+        appearanceMode: AppAppearanceMode = .dark,
         showsDockIcon: Bool = false,
         closesPopoverOnOutsideClick: Bool = true,
-        highlightsMyProcesses: Bool = true,
+        highlightsMyProcesses: Bool = false,
         idleNotificationSeconds: Int = 300,
         idleMemoryThresholdMB: Int = 50
     ) {
@@ -605,10 +605,10 @@ struct AppSettings: Codable, Equatable, Sendable {
             remoteCommand: try container.decodeIfPresent(String.self, forKey: .remoteCommand) ?? Self.defaultRemoteCommand,
             menuBarDisplayMode: try container.decodeIfPresent(MenuBarDisplayMode.self, forKey: .menuBarDisplayMode) ?? .averageAndBusy,
             languagePreference: try container.decodeIfPresent(AppLanguagePreference.self, forKey: .languagePreference) ?? .system,
-            appearanceMode: try container.decodeIfPresent(AppAppearanceMode.self, forKey: .appearanceMode) ?? .system,
+            appearanceMode: try container.decodeIfPresent(AppAppearanceMode.self, forKey: .appearanceMode) ?? .dark,
             showsDockIcon: try container.decodeIfPresent(Bool.self, forKey: .showsDockIcon) ?? false,
             closesPopoverOnOutsideClick: try container.decodeIfPresent(Bool.self, forKey: .closesPopoverOnOutsideClick) ?? true,
-            highlightsMyProcesses: try container.decodeIfPresent(Bool.self, forKey: .highlightsMyProcesses) ?? true,
+            highlightsMyProcesses: try container.decodeIfPresent(Bool.self, forKey: .highlightsMyProcesses) ?? false,
             idleNotificationSeconds: try container.decodeIfPresent(Int.self, forKey: .idleNotificationSeconds) ?? 300,
             idleMemoryThresholdMB: try container.decodeIfPresent(Int.self, forKey: .idleMemoryThresholdMB) ?? 50
         )
@@ -761,12 +761,12 @@ struct GPUReading: Identifiable, Equatable, Sendable {
     }
 
     var memorySummary: String {
-        "\(memoryUsedMB) / \(memoryTotalMB) MB"
+        "\(MemoryFormatter.gigabytes(fromMB: memoryUsedMB)) / \(MemoryFormatter.gigabytes(fromMB: memoryTotalMB))"
     }
 
     var temperatureSummary: String {
         if let temperatureCelsius {
-            return "\(temperatureCelsius) C"
+            return "\(temperatureCelsius)°C"
         }
 
         return "--"
@@ -794,6 +794,30 @@ struct GPUReading: Identifiable, Equatable, Sendable {
     }
 }
 
+struct HostProcessReading: Equatable, Sendable, Identifiable {
+    let pid: Int
+    let cpuPercent: Double
+    let memoryPercent: Double
+    let commandLine: String
+
+    var id: Int { pid }
+
+    var displayName: String {
+        let firstToken = commandLine.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? commandLine
+        return firstToken.split(separator: "/").last.map(String.init) ?? firstToken
+    }
+}
+
+enum MemoryFormatter {
+    static func gigabytes(fromMB megabytes: Int) -> String {
+        let gigabytes = Double(megabytes) / 1024
+        if gigabytes >= 100 {
+            return String(format: "%.0fGB", gigabytes)
+        }
+        return String(format: "%.1fGB", gigabytes)
+    }
+}
+
 struct HostStats: Equatable, Sendable {
     let cpuCoreCount: Int
     let loadAverage1: Double
@@ -802,6 +826,9 @@ struct HostStats: Equatable, Sendable {
     let memoryTotalMB: Int
     let memoryAvailableMB: Int
     var hostname: String?
+    var cpuUtilizationPercent: Int?
+    var coreUtilizationPercents: [Int] = []
+    var topUserProcesses: [HostProcessReading] = []
 
     var memoryUsedMB: Int {
         max(memoryTotalMB - memoryAvailableMB, 0)
@@ -1039,7 +1066,7 @@ struct GPUProcessReading: Identifiable, Equatable, Sendable {
     }
 
     var memorySummary: String {
-        "\(usedGPUMemoryMB) MB"
+        MemoryFormatter.gigabytes(fromMB: usedGPUMemoryMB)
     }
 
     var userSummary: String {
