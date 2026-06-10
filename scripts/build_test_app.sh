@@ -4,9 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${VERSION:-0.5.0}"
 SHORT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD | tr '[:upper:]' '[:lower:]')"
-APP_NAME="NVBeacon-${VERSION}-test-${SHORT_SHA}"
+APP_NAME="Beacon-${VERSION}-test-${SHORT_SHA}"
 APP_PATH="$ROOT_DIR/dist/${APP_NAME}.app"
-TEST_BUNDLE_ID="com.leejaein.NVBeacon.test.${SHORT_SHA}"
+TEST_BUNDLE_ID="com.timkoopmans.beacon.test.${SHORT_SHA}"
 OPEN_APP="${OPEN_APP:-0}"
 CLEAN_OLD_TEST_APPS="${CLEAN_OLD_TEST_APPS:-1}"
 

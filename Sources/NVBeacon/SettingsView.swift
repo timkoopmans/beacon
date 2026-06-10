@@ -74,7 +74,7 @@ struct SettingsView: View {
     }
 
     private var bundleIdentifierText: String {
-        Bundle.main.bundleIdentifier ?? "com.leejaein.NVBeacon"
+        Bundle.main.bundleIdentifier ?? "com.timkoopmans.beacon"
     }
 
     private var bundleIdentifierDisplayText: String {

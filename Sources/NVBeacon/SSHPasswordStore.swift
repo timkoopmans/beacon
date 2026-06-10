@@ -3,7 +3,7 @@ import LocalAuthentication
 import Security
 
 struct SSHPasswordStore {
-    private let service = "com.leejaein.NVBeacon.ssh-password"
+    private let service = "com.timkoopmans.beacon.ssh-password"
     static let legacyAccount = "current"
 
     func hasPasswordWithoutPrompt(account: String = Self.legacyAccount) -> Bool {
