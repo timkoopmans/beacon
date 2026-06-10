@@ -135,6 +135,69 @@ import Testing
     #expect(status.node(matchingHostname: nil) == nil)
 }
 
+@Test func summaryScriptDoesNotContainSectionMarkers() {
+    // The remote shell's argv (visible via `ps … args=`) contains the whole
+    // script; a literal marker there would echo back into the parsed output.
+    let script = SSHMetricsFetcher.buildSummaryRemoteCommand(summaryCommand: "nvidia-smi --query-gpu=...")
+
+    for marker in [
+        "__GPUUSAGE_PROCESS_SECTION__",
+        "__GPUUSAGE_PS_SECTION__",
+        "__GPUUSAGE_HOST_SECTION__",
+        "__GPUUSAGE_HOST_PROCS__",
+        "__GPUUSAGE_SLURM_SECTION__",
+        "__GPUUSAGE_SLURM_JOBS__",
+    ] {
+        #expect(!script.contains(marker), "script leaks marker \(marker)")
+    }
+}
+
+@Test func sectionMatchingIgnoresMarkersEmbeddedMidLine() throws {
+    // A `ps … args=` line for beacon's own SSH shell carries the whole fetch
+    // script on one line (newlines collapsed), embedding every marker mid-line.
+    let psLeakLine = #"3027 12.0 0.1 bash -c /bin/sh -lc 'nvidia-smi ... printf '\''\n__GPUUSAGE_SLURM_SECTION__\n'\'' sinfo -N -h -o '\''%N|%P|%t'\'' printf '\''\n__GPUUSAGE_SLURM_JOBS__\n'\'' squeue -h -o '\''%i|%P|%j|%u|%T|%M|%D|%R'\'' 2>/dev/null || true fi'"#
+    let output = """
+    4,2.50,2.20,1.75,16000,8000,cdc-1
+    42,90,15,60,3
+    __GPUUSAGE_HOST_PROCS__
+    \(psLeakLine)
+    __GPUUSAGE_SLURM_SECTION__
+    cdc-1|cpu*|alloc
+    cdc-2|cpu*|idle
+    __GPUUSAGE_SLURM_JOBS__
+    769|cpu|bt-hl-carry|algolotl|RUNNING|0:23|1|cdc-1
+    """
+
+    let slurmSection = SSHMetricsFetcher.section(named: "__GPUUSAGE_SLURM_SECTION__", from: output)
+    let status = try #require(SSHMetricsFetcher.parseSlurmSection(slurmSection))
+
+    #expect(status.jobs.count == 1)
+    #expect(status.jobs[0].jobID == "769")
+    #expect(status.allocatedNodeCount == 1)
+    #expect(status.idleNodeCount == 1)
+
+    let hostSection = SSHMetricsFetcher.section(named: nil, from: output)
+    let hostStats = try #require(SSHMetricsFetcher.parseHostStatsSection(hostSection))
+    #expect(hostStats.hostname == "cdc-1")
+    #expect(hostStats.topUserProcesses.count == 1)
+}
+
+@Test func slurmJobRowsRequireNumericJobIDs() throws {
+    // An echoed squeue command splits into exactly 8 pipe columns; it must not
+    // become a phantom job.
+    let output = """
+    cdc-1|cpu*|alloc
+    __GPUUSAGE_SLURM_JOBS__
+    squeue -h -o '%i|%P|%j|%u|%T|%M|%D|%R' 2>/dev/null || true fi
+    769|cpu|bt-hl-carry|algolotl|RUNNING|0:23|1|cdc-1
+    """
+
+    let status = try #require(SSHMetricsFetcher.parseSlurmSection(output))
+
+    #expect(status.jobs.count == 1)
+    #expect(status.jobs[0].jobID == "769")
+}
+
 @Test func slurmSectionIsOmittedWhenUnavailable() {
     #expect(SSHMetricsFetcher.parseSlurmSection("") == nil)
     #expect(SSHMetricsFetcher.parseSlurmSection("\n  \n") == nil)

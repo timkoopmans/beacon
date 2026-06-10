@@ -253,17 +253,19 @@ struct SSHMetricsFetcher: Sendable {
     }
 
     static func parseHostStatsSection(_ output: String) -> HostStats? {
-        var trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        var statsLines = output.components(separatedBy: "\n")
 
         var topUserProcesses = [HostProcessReading]()
-        if let processesRange = trimmed.range(of: hostProcessesSeparator) {
-            topUserProcesses = trimmed[processesRange.upperBound...]
-                .split(whereSeparator: \.isNewline)
-                .compactMap(parseHostProcessLine(_:))
-            trimmed = String(trimmed[..<processesRange.lowerBound])
+        if let markerIndex = statsLines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == hostProcessesSeparator }) {
+            topUserProcesses = statsLines[(markerIndex + 1)...]
+                .compactMap { parseHostProcessLine(Substring($0)) }
+            statsLines = Array(statsLines[..<markerIndex])
         }
 
-        let lines = trimmed.split(whereSeparator: \.isNewline)
+        let lines = statsLines
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isNewline)
         guard let line = lines.first else {
             return nil
         }
@@ -338,23 +340,20 @@ struct SSHMetricsFetcher: Sendable {
             return nil
         }
 
-        let nodesText: String
-        let jobsText: String
+        let lines = trimmed.components(separatedBy: "\n")
+        let nodeLines: ArraySlice<String>
+        let jobLines: ArraySlice<String>
 
-        if let jobsRange = trimmed.range(of: slurmJobsSeparator) {
-            nodesText = String(trimmed[..<jobsRange.lowerBound])
-            jobsText = String(trimmed[jobsRange.upperBound...])
+        if let markerIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == slurmJobsSeparator }) {
+            nodeLines = lines[..<markerIndex]
+            jobLines = lines[(markerIndex + 1)...]
         } else {
-            nodesText = trimmed
-            jobsText = ""
+            nodeLines = lines[...]
+            jobLines = []
         }
 
-        let nodes = nodesText
-            .split(whereSeparator: \.isNewline)
-            .compactMap(parseSlurmNodeLine(_:))
-        let jobs = jobsText
-            .split(whereSeparator: \.isNewline)
-            .compactMap(parseSlurmJobLine(_:))
+        let nodes = nodeLines.compactMap { parseSlurmNodeLine(Substring($0)) }
+        let jobs = jobLines.compactMap { parseSlurmJobLine(Substring($0)) }
 
         guard !nodes.isEmpty || !jobs.isEmpty else {
             return nil
@@ -384,7 +383,9 @@ struct SSHMetricsFetcher: Sendable {
             .split(separator: "|", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-        guard columns.count >= 8, !columns[0].isEmpty else {
+        // Slurm job IDs are numeric ("769", "769_3", "769+1"); rejecting anything
+        // else keeps stray pipe-delimited text out of the job list.
+        guard columns.count >= 8, columns[0].first?.isNumber == true else {
             return nil
         }
 
@@ -652,10 +653,18 @@ struct SSHMetricsFetcher: Sendable {
         )
     }
 
-    private static func buildSummaryRemoteCommand(summaryCommand: String) -> String {
+    // The remote shell's argv (visible in `ps … args=`) contains this entire script,
+    // so a marker written literally here can echo back into the output we parse.
+    // Emit it as two adjacent single-quoted halves the shell rejoins at runtime.
+    private static func scriptMarker(_ separator: String) -> String {
+        let mid = separator.index(separator.startIndex, offsetBy: separator.count / 2)
+        return "\(separator[..<mid])''\(separator[mid...])"
+    }
+
+    static func buildSummaryRemoteCommand(summaryCommand: String) -> String {
         """
         \(summaryCommand)
-        printf '\\n\(processSectionSeparator)\\n'
+        printf '\\n\(scriptMarker(processSectionSeparator))\\n'
         process_output="$(\(processDetailsCommand) 2>/dev/null || true)"
         printf '%s\\n' "$process_output" | while IFS=, read -r gpu_uuid pid pname used_mem; do
           gpu_uuid="$(printf '%s' "$gpu_uuid" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
@@ -671,7 +680,7 @@ struct SSHMetricsFetcher: Sendable {
           [ -n "$real_uid" ] || continue
           printf '%s,%s,%s,%s,%s\\n' "$gpu_uuid" "$pid" "$real_uid" "$pname" "$used_mem"
         done
-        printf '\\n\(hostStatsSectionSeparator)\\n'
+        printf '\\n\(scriptMarker(hostStatsSectionSeparator))\\n'
         host_cpus="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
         host_load="$(cut -d ' ' -f 1-3 /proc/loadavg 2>/dev/null || uptime 2>/dev/null | sed 's/.*load average[s]*: *//; s/,/ /g' || echo '0 0 0')"
         set -- $host_load
@@ -698,12 +707,12 @@ struct SSHMetricsFetcher: Sendable {
             print line
           }
         }'
-        printf '\(hostProcessesSeparator)\\n'
-        ps -u "$(id -un)" -o pid=,pcpu=,pmem=,args= --sort=-pcpu 2>/dev/null | head -n 5 || true
-        printf '\\n\(slurmSectionSeparator)\\n'
+        printf '\(scriptMarker(hostProcessesSeparator))\\n'
+        ps -u "$(id -un)" -o pid=,pcpu=,pmem=,args= --sort=-pcpu 2>/dev/null | grep -v _GPUUSAGE | head -n 5 || true
+        printf '\\n\(scriptMarker(slurmSectionSeparator))\\n'
         if command -v squeue >/dev/null 2>&1; then
           sinfo -N -h -o '%N|%P|%t' 2>/dev/null || true
-          printf '\\n\(slurmJobsSeparator)\\n'
+          printf '\\n\(scriptMarker(slurmJobsSeparator))\\n'
           squeue -h -o '%i|%P|%j|%u|%T|%M|%D|%R' 2>/dev/null || true
         fi
         """
@@ -747,32 +756,31 @@ struct SSHMetricsFetcher: Sendable {
         }
     }
 
-    private static func section(named name: String?, from output: String) -> String {
-        let separators = [processSectionSeparator, psSectionSeparator, hostStatsSectionSeparator, slurmSectionSeparator]
+    private static let sectionSeparators: Set<String> = [
+        processSectionSeparator, psSectionSeparator, hostStatsSectionSeparator, slurmSectionSeparator,
+    ]
 
+    // Separators count only as whole lines: the remote `ps … args=` listing can
+    // include processes whose command line embeds marker-like text mid-line.
+    static func section(named name: String?, from output: String) -> String {
+        let lines = output.components(separatedBy: "\n")
+
+        var startIndex = 0
         if let name {
-            guard let startRange = output.range(of: name) else {
+            guard let markerIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == name }) else {
                 return ""
             }
-
-            let contentStart = startRange.upperBound
-            let nextRange = separators
-                .filter { $0 != name }
-                .compactMap { separator -> Range<String.Index>? in
-                    output.range(of: separator, range: contentStart..<output.endIndex)
-                }
-                .min { $0.lowerBound < $1.lowerBound }
-
-            let sectionRange = contentStart..<(nextRange?.lowerBound ?? output.endIndex)
-            return String(output[sectionRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            startIndex = markerIndex + 1
         }
 
-        let firstSeparatorRange = separators
-            .compactMap { separator in output.range(of: separator) }
-            .min { $0.lowerBound < $1.lowerBound }
+        let endIndex = lines[startIndex...].firstIndex { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed != name && sectionSeparators.contains(trimmed)
+        } ?? lines.endIndex
 
-        let endIndex = firstSeparatorRange?.lowerBound ?? output.endIndex
-        return String(output[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return lines[startIndex..<endIndex]
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func parsePSLine(_ line: String) throws -> RemoteProcessStatus {
